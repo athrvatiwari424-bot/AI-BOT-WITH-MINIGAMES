@@ -6,6 +6,20 @@ from discord.ext import commands
 from database import update_user_stats, get_user_stats
 
 
+class BotPlayer:
+    """Mock player object for bots to integrate seamlessly into team management."""
+    def __init__(self, name: str):
+        self.name = name
+        self.display_name = name
+        self.id = name  # String identifier to distinguish from integer Discord IDs
+
+    def __str__(self):
+        return self.name
+
+    def __repr__(self):
+        return self.name
+
+
 class LobbyJoinView(discord.ui.View):
     def __init__(self, lobby_data):
         super().__init__(timeout=None)
@@ -374,16 +388,17 @@ class CricketCog(commands.Cog):
             bot_list = [n.strip() for n in names.split(",") if n.strip()]
 
         for bname in bot_list:
-            lobby["players"].append(bname)
+            bot_obj = BotPlayer(bname)
+            lobby["players"].append(bot_obj)
             if len(lobby["team_a"]) <= len(lobby["team_b"]):
-                lobby["team_a"].append(bname)
+                lobby["team_a"].append(bot_obj)
             else:
-                lobby["team_b"].append(bname)
+                lobby["team_b"].append(bot_obj)
                 if not lobby["captain_b"]:
-                    lobby["captain_b"] = bname
+                    lobby["captain_b"] = bot_obj.id
 
         await interaction.response.send_message(
-            f"Successfully added {len(bot_list)} bots. ✅"
+            f"Successfully added {len(bot_list)} bot(s) to the match. ✅"
         )
 
     @app_commands.command(name="toss", description="Start the toss for the match.")
@@ -396,7 +411,7 @@ class CricketCog(commands.Cog):
 
         if not lobby["captain_b"]:
             lobby["captain_b"] = (
-                lobby["team_b"][0] if lobby["team_b"] else "Opponent Captain"
+                lobby["team_b"][0].id if lobby["team_b"] else "Opponent Captain"
             )
 
         cap_a_mention = (
@@ -428,18 +443,23 @@ class CricketCog(commands.Cog):
         await self.run_full_match(interaction.channel, lobby)
 
     async def get_typing_input(
-        self, channel, player, role: str, last_action: int, opponent_last_action: int, current_score: int, target_runs: int, balls_left: int, wickets_left: int
+        self, player, role: str, last_action: int, opponent_last_action: int, current_score: int, is_innings_two: bool, runs_needed: int, balls_left: int, wickets_left: int
     ) -> int:
-        if isinstance(player, str):
+        """Prompt individual player via DM. Supports BotPlayer objects seamlessly."""
+        if isinstance(player, BotPlayer) or isinstance(player, str):
             await asyncio.sleep(1)
             return random.randint(1, 6)
 
         try:
-            dm_text = (
-                f"**Match Status**\n"
+            status_header = (
                 f"Opponent's last action -> {opponent_last_action}\n"
                 f"Score: {current_score}\n"
-                f"Runs left: {target_runs} | Balls left: {balls_left} | Wickets left: {wickets_left}\n\n"
+            )
+            if is_innings_two:
+                status_header += f"Runs left: {runs_needed} | Balls left: {balls_left} | Wickets left: {wickets_left}\n"
+
+            dm_text = (
+                f"**Match Status**\n{status_header}\n"
                 f"You are **{role}**! Type a number between **1 and 6** in your DMs within 15 seconds:"
             )
             await player.send(dm_text)
@@ -451,7 +471,7 @@ class CricketCog(commands.Cog):
             return int(msg.content)
         except asyncio.TimeoutError:
             try:
-                await player.send("⌛ Time expired! Repeating your previous action.")
+                await player.send("⌛ You didn't respond in time, so your previous action will be repeated.")
             except Exception:
                 pass
             return last_action if last_action != 0 else 1
@@ -489,7 +509,14 @@ class CricketCog(commands.Cog):
             )
             return False
 
-    async def play_innings(self, channel, lobby, batting_squad, bowling_squad, batting_team_name, bowling_team_name, innings_label, target_score=None):
+    async def send_dm_safe(self, player, text: str):
+        if isinstance(player, discord.User) or isinstance(player, discord.Member):
+            try:
+                await player.send(text)
+            except Exception:
+                pass
+
+    async def play_innings(self, channel, lobby, batting_squad, bowling_squad, batting_team_name, bowling_team_name, innings_label, is_innings_two: bool = False, target_score=None):
         max_balls = lobby["overs"] * 6
         total_runs = 0
         wickets = 0
@@ -519,8 +546,8 @@ class CricketCog(commands.Cog):
             striker = batting_squad[striker_idx]
             bowler = bowling_squad[balls_bowled % len(bowling_squad)]
 
-            striker_name = striker if isinstance(striker, str) else striker.display_name
-            bowler_name = bowler if isinstance(bowler, str) else bowler.display_name
+            striker_name = striker.display_name if hasattr(striker, 'display_name') else str(striker)
+            bowler_name = bowler.display_name if hasattr(bowler, 'display_name') else str(bowler)
 
             last_bat = lobby["last_actions"].get(striker_name, 0)
             last_bowl = lobby["last_actions"].get(bowler_name, 0)
@@ -529,12 +556,15 @@ class CricketCog(commands.Cog):
             wickets_remaining = len(batting_squad) - wickets
             runs_needed = (target_score - total_runs) if target_score else 0
 
-            bat_move = await self.get_typing_input(
-                channel, striker, "BATTER", last_bat, last_bowl, total_runs, runs_needed, balls_remaining, wickets_remaining
+            # SIMULTANEOUS DM PROMPTS: Prompt both batter and bowler concurrently
+            bat_task = self.get_typing_input(
+                striker, "BATTER", last_bat, last_bowl, total_runs, is_innings_two, runs_needed, balls_remaining, wickets_remaining
             )
-            bowl_move = await self.get_typing_input(
-                channel, bowler, "BOWLER", last_bowl, bat_move, 0, runs_needed, balls_remaining, wickets_remaining
+            bowl_task = self.get_typing_input(
+                bowler, "BOWLER", last_bowl, last_bat, total_runs, is_innings_two, runs_needed, balls_remaining, wickets_remaining
             )
+
+            bat_move, bowl_move = await asyncio.gather(bat_task, bowl_task)
 
             lobby["last_actions"][striker_name] = bat_move
             lobby["last_actions"][bowler_name] = bowl_move
@@ -552,6 +582,11 @@ class CricketCog(commands.Cog):
                     wickets += 1
                     timeline.append("🔴 W")
                     await channel.send(f"🔴 **WICKET!** {striker_name} is OUT! Both played **{bat_move}**.")
+                    
+                    # Send Wicket notifications to DMs
+                    await self.send_dm_safe(striker, f"Opponent is out!\nOpponent's last action -> {bowl_move}\nScore: {total_runs} ({balls_bowled})")
+                    await self.send_dm_safe(bowler, f"Opponent is out!\nOpponent's last action -> {bat_move}\nOpponent score: {total_runs} ({balls_bowled})")
+
                     striker_idx = max(striker_idx, non_striker_idx) + 1
                 else:
                     total_runs += bat_move
@@ -565,21 +600,28 @@ class CricketCog(commands.Cog):
                 if bat_move % 2 != 0 and non_striker_idx < len(batting_squad):
                     striker_idx, non_striker_idx = non_striker_idx, striker_idx
 
+            # End of Over notification
             if balls_bowled % 6 == 0 and non_striker_idx < len(batting_squad):
                 striker_idx, non_striker_idx = non_striker_idx, striker_idx
+                await self.send_dm_safe(bowler, "Your over is finished!")
 
             updated_embed = self.build_match_embed(
                 match_title=guild_name,
                 innings=innings_label,
                 overs_str=f"{overs_completed} / {lobby['overs']}.0",
                 host_name=lobby["host"].name,
-                timeline=timeline[-10:],  # Keep last 10 entries in timeline view
+                timeline=timeline[-10:],
                 team_a_txt=f"{total_runs}/{wickets} ({overs_completed} overs) (RR: {rr})",
                 team_b_txt="Target / Stats tracking...",
                 batter_txt=f"{striker_name}: {total_runs} runs",
                 bowler_txt=f"{bowler_name}: {wickets} wickets",
             )
             await status_msg.edit(embed=updated_embed)
+
+        # Notify end of innings in DM
+        end_dm = f"Their team is all out! Innings over." if wickets >= len(batting_squad) else f"Innings over."
+        await self.send_dm_safe(striker, end_dm)
+        await self.send_dm_safe(bowler, end_dm)
 
         return total_runs, wickets
 
@@ -600,7 +642,7 @@ class CricketCog(commands.Cog):
             name1, name2 = team_b_name, team_a_name
 
         await channel.send(f"🏟️ **Innings ONE Started!**\nBatting: **{name1}** | Bowling: **{name2}**")
-        score1, wickets1 = await self.play_innings(channel, lobby, bat1_squad, bowl1_squad, name1, name2, "ONE")
+        score1, wickets1 = await self.play_innings(channel, lobby, bat1_squad, bowl1_squad, name1, name2, "ONE", is_innings_two=False)
 
         target = score1 + 1
         await channel.send(f"🏁 **Innings 1 Over!**\n**{name1}** scored **{score1}/{wickets1}**.\nTarget for **{name2}**: **{target}** runs.")
@@ -611,7 +653,7 @@ class CricketCog(commands.Cog):
 
         # Innings 2 - Swap roles
         await channel.send(f"🏟️ **Innings TWO Started!**\nBatting: **{name2}** | Bowling: **{name1}**")
-        score2, wickets2 = await self.play_innings(channel, lobby, bowl1_squad, bat1_squad, name2, name1, "TWO", target_score=target)
+        score2, wickets2 = await self.play_innings(channel, lobby, bowl1_squad, bat1_squad, name2, name1, "TWO", is_innings_two=True, target_score=target)
 
         # Match Result
         if score2 >= target:
