@@ -1,37 +1,35 @@
 import asyncio
-from datetime import datetime
+import http.server
 import json
 import logging
-from json import loads
 import os
+import socketserver
+import threading
 import traceback
-
 import aiosqlite
 import discord
 from discord.ext import commands
 
-from utils import *
-
 logging.basicConfig(level=logging.INFO)
 
-# --- CONFIGURATION SETUP (Reads from Render Environment Variables) ---
+# --- CONFIGURATION SETUP ---
 token = os.environ.get('DISCORD_TOKEN')
 default_prefix = os.environ.get('BOT_PREFIX', '!')
 
 if isinstance(default_prefix, str):
   default_prefix = [default_prefix, default_prefix]
 
-# Optional fallback for local testing if config.json is present
+# Fallback for local testing if config.json exists
 if not token and os.path.exists('config.json'):
   try:
     with open('config.json') as f:
       config = json.load(f)
       if config.get('stage') == 'Prod':
-        default_prefix = config['default_prefix']
-        token = config['token']
+        default_prefix = config.get('default_prefix', '!')
+        token = config.get('token')
       else:
-        default_prefix = config['beta_prefix']
-        token = config['beta_token']
+        default_prefix = config.get('beta_prefix', '!')
+        token = config.get('beta_token')
   except Exception as e:
     logging.warning(f'Could not load config.json: {e}')
 
@@ -53,7 +51,7 @@ class NottyBot(commands.Bot):
   def __init__(self):
     super().__init__(command_prefix=self.get_prefix_custom, intents=intents)
     self.db = None
-    self.games = {}  # Active games tracker for minigames & cricket
+    self.games = {}  # Active games tracker
 
   async def get_prefix_custom(self, message):
     if not message.guild:
@@ -70,7 +68,7 @@ class NottyBot(commands.Bot):
     return default_prefix
 
   async def setup_hook(self):
-    # Initialize SQLite database and required tables
+    # Initialize SQLite database
     self.db = await aiosqlite.connect('database.db')
     await self.db.execute('''
             CREATE TABLE IF NOT EXISTS prefixes (
@@ -88,7 +86,7 @@ class NottyBot(commands.Bot):
     await self.db.commit()
     logging.info('Connected to SQLite Database and tables verified.')
 
-    # Load all modular Cogs
+    # Load modular extensions
     extensions = ['moderation', 'minigames', 'cricket']
     for ext in extensions:
       try:
@@ -118,9 +116,6 @@ class NottyBot(commands.Bot):
       await ctx.send(f'⏳ Cooldown active. Try again in {error.retry_after:.1f}s.')
     else:
       logging.error(f'Unhandled command error: {error}')
-      traceback.print_exception(
-          type(error), error, error.__traceback__, chain=False
-      )
 
   async def close(self):
     if self.db:
@@ -131,7 +126,7 @@ class NottyBot(commands.Bot):
 bot = NottyBot()
 
 
-# --- UTILITY COMMANDS (Prefix / Bot Management) ---
+# --- UTILITY COMMANDS ---
 @bot.command(name='setprefix', help='Change the server prefix')
 @commands.has_permissions(administrator=True)
 async def setprefix(ctx, new_prefix: str):
@@ -160,13 +155,7 @@ async def ping(ctx):
   await ctx.send(embed=embed)
 
 
-if __name__ == '__main__':
-  bot.run(token)
-import http.server
-import socketserver
-import threading
-
-# --- RENDER PORT BINDING FIX ---
+# --- RENDER PORT BINDING WEB SERVER ---
 PORT = int(os.environ.get('PORT', 10000))
 
 
@@ -184,5 +173,7 @@ def run_web_server():
     httpd.serve_forever()
 
 
-# Start the web server in a background thread so it satisfies Render's port scanner
 threading.Thread(target=run_web_server, daemon=True).start()
+
+if __name__ == '__main__':
+  bot.run(token)
