@@ -8,7 +8,7 @@ ACTIVE_LOBBIES = {}
 USER_BALANCES = {}
 
 
-# --- 1. TEAM HAND CRICKET ENGINE (WITH REAL CRICKET GIFs) ---
+# --- 1. TEAM HAND CRICKET ENGINE ---
 class CricketSetupView(discord.ui.View):
 
   def __init__(self, game):
@@ -109,7 +109,6 @@ class TeamCricketGame:
     self.server_name = ctx.guild.name if ctx.guild else "NOTTYAMERICA"
     self.bot_counter = 1
     self.match_started = False
-    # Verified, high-quality real cricket action GIFs
     self.gifs = [
         "https://media.giphy.com/media/l4FGpPki5v2Bcd6Ss/giphy.gif",
         "https://media.giphy.com/media/26ufc8n6KYsFpuzoA/giphy.gif",
@@ -662,4 +661,4 @@ class Minigames(commands.Cog):
 
 
 async def setup(bot):
-  await bot.load_extension(Minigames(bot)) # type: ignore
+  await bot.add_cog(Minigames(bot))
