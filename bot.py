@@ -3,7 +3,7 @@ from datetime import datetime
 import json
 import logging
 from json import loads
-from os import environ
+import os
 import traceback
 
 import aiosqlite
@@ -12,17 +12,34 @@ from discord.ext import commands
 
 from utils import *
 
-# --- CONFIGURATION SETUP ---
-with open('config.json') as f:
-  logging.basicConfig(level=logging.INFO)
-  config = json.load(f)
+logging.basicConfig(level=logging.INFO)
 
-  if config.get('stage') == 'Prod':
-    default_prefix = config['default_prefix']
-    token = config['token']
-  else:
-    default_prefix = config['beta_prefix']
-    token = config['beta_token']
+# --- CONFIGURATION SETUP (Reads from Render Environment Variable) ---
+token = os.environ.get('DISCORD_TOKEN')
+default_prefix = os.environ.get('BOT_PREFIX', '!')
+
+if isinstance(default_prefix, str):
+  default_prefix = [default_prefix, default_prefix]
+
+# Optional fallback for local testing if config.json is present
+if not token and os.path.exists('config.json'):
+  try:
+    with open('config.json') as f:
+      config = json.load(f)
+      if config.get('stage') == 'Prod':
+        default_prefix = config['default_prefix']
+        token = config['token']
+      else:
+        default_prefix = config['beta_prefix']
+        token = config['beta_token']
+  except Exception as e:
+    logging.warning(f'Could not load config.json: {e}')
+
+if not token:
+  raise ValueError(
+      '❌ No Discord token found! Ensure DISCORD_TOKEN is set in Render'
+      ' Environment Variables.'
+  )
 
 
 # --- DYNAMIC PREFIX RETRIEVAL ---
