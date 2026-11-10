@@ -7,11 +7,10 @@ from database import update_user_stats, get_user_stats
 
 
 class BotPlayer:
-    """Mock player object for bots to integrate seamlessly into team management."""
     def __init__(self, name: str):
         self.name = name
         self.display_name = name
-        self.id = name  # String identifier to distinguish from integer Discord IDs
+        self.id = name
 
     def __str__(self):
         return self.name
@@ -445,24 +444,25 @@ class CricketCog(commands.Cog):
     async def get_typing_input(
         self, player, role: str, last_action: int, opponent_last_action: int, current_score: int, is_innings_two: bool, runs_needed: int, balls_left: int, wickets_left: int
     ) -> int:
-        """Prompt individual player via DM. Supports BotPlayer objects seamlessly."""
         if isinstance(player, BotPlayer) or isinstance(player, str):
             await asyncio.sleep(1)
             return random.randint(1, 6)
 
         try:
-            status_header = (
-                f"Opponent's last action -> {opponent_last_action}\n"
-                f"Score: {current_score}\n"
-            )
+            embed = discord.Embed(title="🏏 Hand Cricket Match Status", color=discord.Color.dark_purple())
+            embed.add_field(name="Opponent's Last Action", value=str(opponent_last_action), inline=False)
+            embed.add_field(name="Current Score", value=str(current_score), inline=False)
+            
             if is_innings_two:
-                status_header += f"Runs left: {runs_needed} | Balls left: {balls_left} | Wickets left: {wickets_left}\n"
+                embed.add_field(
+                    name="Run Chase Status",
+                    value=f"Runs left: {runs_needed} | Balls left: {balls_left} | Wickets left: {wickets_left}",
+                    inline=False,
+                )
 
-            dm_text = (
-                f"**Match Status**\n{status_header}\n"
-                f"You are **{role}**! Type a number between **1 and 6** in your DMs within 15 seconds:"
-            )
-            await player.send(dm_text)
+            embed.description = f"You are **{role}**! Type a number between **1 and 6** in your DMs within 15 seconds:"
+            
+            dm_msg = await player.send(embed=embed)
 
             def check(m):
                 return m.author.id == player.id and isinstance(m.channel, discord.DMChannel) and m.content.isdigit() and 1 <= int(m.content) <= 6
@@ -471,7 +471,7 @@ class CricketCog(commands.Cog):
             return int(msg.content)
         except asyncio.TimeoutError:
             try:
-                await player.send("⌛ You didn't respond in time, so your previous action will be repeated.")
+                await player.send("⌛ You didn't respond in time, repeating previous action.")
             except Exception:
                 pass
             return last_action if last_action != 0 else 1
@@ -509,10 +509,11 @@ class CricketCog(commands.Cog):
             )
             return False
 
-    async def send_dm_safe(self, player, text: str):
+    async def send_dm_embed_safe(self, player, title: str, description: str):
         if isinstance(player, discord.User) or isinstance(player, discord.Member):
             try:
-                await player.send(text)
+                embed = discord.Embed(title=title, description=description, color=discord.Color.blue())
+                await player.send(embed=embed)
             except Exception:
                 pass
 
@@ -556,7 +557,6 @@ class CricketCog(commands.Cog):
             wickets_remaining = len(batting_squad) - wickets
             runs_needed = (target_score - total_runs) if target_score else 0
 
-            # SIMULTANEOUS DM PROMPTS: Prompt both batter and bowler concurrently
             bat_task = self.get_typing_input(
                 striker, "BATTER", last_bat, last_bowl, total_runs, is_innings_two, runs_needed, balls_remaining, wickets_remaining
             )
@@ -583,9 +583,20 @@ class CricketCog(commands.Cog):
                     timeline.append("🔴 W")
                     await channel.send(f"🔴 **WICKET!** {striker_name} is OUT! Both played **{bat_move}**.")
                     
-                    # Send Wicket notifications to DMs
-                    await self.send_dm_safe(striker, f"Opponent is out!\nOpponent's last action -> {bowl_move}\nScore: {total_runs} ({balls_bowled})")
-                    await self.send_dm_safe(bowler, f"Opponent is out!\nOpponent's last action -> {bat_move}\nOpponent score: {total_runs} ({balls_bowled})")
+                    # CORRECTED DM NOTIFICATIONS (Batter sees opponent is out, Bowler sees opponent's score)
+                    is_team_all_out = (wickets >= len(batting_squad))
+                    out_status_text = "Their team is all out! Innings over." if is_team_all_out else "Wicket fallen!"
+
+                    await self.send_dm_embed_safe(
+                        striker, 
+                        "🔴 Wicket Update", 
+                        f"Opponent is out!\nOpponent's last action -> {bowl_move}\nScore: {total_runs} ({balls_bowled})\n{out_status_text}"
+                    )
+                    await self.send_dm_embed_safe(
+                        bowler, 
+                        "🔴 Wicket Update", 
+                        f"Batter is out!\nOpponent's last action -> {bat_move}\nOpponent score: {total_runs} ({balls_bowled})\n{out_status_text}"
+                    )
 
                     striker_idx = max(striker_idx, non_striker_idx) + 1
                 else:
@@ -600,10 +611,9 @@ class CricketCog(commands.Cog):
                 if bat_move % 2 != 0 and non_striker_idx < len(batting_squad):
                     striker_idx, non_striker_idx = non_striker_idx, striker_idx
 
-            # End of Over notification
             if balls_bowled % 6 == 0 and non_striker_idx < len(batting_squad):
                 striker_idx, non_striker_idx = non_striker_idx, striker_idx
-                await self.send_dm_safe(bowler, "Your over is finished!")
+                await self.send_dm_embed_safe(bowler, "Over Finished", "Your over is finished!")
 
             updated_embed = self.build_match_embed(
                 match_title=guild_name,
@@ -617,11 +627,6 @@ class CricketCog(commands.Cog):
                 bowler_txt=f"{bowler_name}: {wickets} wickets",
             )
             await status_msg.edit(embed=updated_embed)
-
-        # Notify end of innings in DM
-        end_dm = f"Their team is all out! Innings over." if wickets >= len(batting_squad) else f"Innings over."
-        await self.send_dm_safe(striker, end_dm)
-        await self.send_dm_safe(bowler, end_dm)
 
         return total_runs, wickets
 
