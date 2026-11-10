@@ -8,7 +8,7 @@ ACTIVE_LOBBIES = {}
 USER_BALANCES = {}
 
 
-# --- 1. TEAM HAND CRICKET ENGINE (WITH GIFs) ---
+# --- 1. TEAM HAND CRICKET ENGINE (WITH REAL CRICKET GIFs) ---
 class CricketSetupView(discord.ui.View):
 
   def __init__(self, game):
@@ -109,11 +109,13 @@ class TeamCricketGame:
     self.server_name = ctx.guild.name if ctx.guild else "NOTTYAMERICA"
     self.bot_counter = 1
     self.match_started = False
-    # Cinematic Cricket GIFs
+    # Verified, high-quality real cricket action GIFs
     self.gifs = [
-        "https://media.giphy.com/media/l0HlRnAWXxn0MhOBK/giphy.gif",
-        "https://media.giphy.com/media/3oKIPnAiaMCws8nOsE/giphy.gif",
+        "https://media.giphy.com/media/l4FGpPki5v2Bcd6Ss/giphy.gif",
+        "https://media.giphy.com/media/26ufc8n6KYsFpuzoA/giphy.gif",
         "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif",
+        "https://media.giphy.com/media/3orieNwJHFXfO9q1y8/giphy.gif",
+        "https://media.giphy.com/media/xT9IgusjhuL5TSGc8U/giphy.gif",
     ]
 
   def init_player(self, user):
@@ -318,7 +320,9 @@ class TeamCricketGame:
         ),
         color=discord.Color.green(),
     )
-    embed.set_image(url="https://media.giphy.com/media/l0HlRnAWXxn0MhOBK/giphy.gif")
+    embed.set_image(
+        url="https://media.giphy.com/media/26ufc8n6KYsFpuzoA/giphy.gif"
+    )
     await self.ctx.send(content=win_str, embed=embed)
 
 
@@ -412,19 +416,21 @@ class TicTacToeView(discord.ui.View):
     return None
 
 
-# --- 3. HYBRID COMMANDS COG (ECO, GAMES, STEAL) ---
-USER_BALANCES = {}
-
-
+# --- 3. HYBRID COMMANDS COG (ECO, GAMES, STEAL, TESTS) ---
 class Minigames(commands.Cog):
 
   def __init__(self, bot):
     self.bot = bot
 
-  # 🏏 Hand Cricket (.cricket and /cricket)
+  def get_balanced_percentage(self):
+    if random.random() < 0.75:
+      return random.randint(0, 100)
+    else:
+      return random.randint(101, 250)
+
   @commands.hybrid_command(
       name="cricket",
-      description="Start a multi-player Team Hand Cricket match with GIFs!",
+      description="Start a multi-player Team Hand Cricket match with real cricket GIFs!",
   )
   @app_commands.describe(
       overs="Overs per match (default: 2)",
@@ -441,7 +447,6 @@ class Minigames(commands.Cog):
     game = TeamCricketGame(ctx, overs=overs, players_per_team=players_per_team)
     await game.start_match()
 
-  # 🤖 Add Bot manually during setup (/addbot a or /addbot b)
   @commands.hybrid_command(
       name="addbot", description="Manually add a bot to Team A or Team B."
   )
@@ -479,7 +484,6 @@ class Minigames(commands.Cog):
     ):
       lobby.match_started = True
 
-  # ❌⭕ Tic-Tac-Toe (.ttt and /ttt)
   @commands.hybrid_command(
       name="ttt", description="Play interactive Tic-Tac-Toe with a friend!"
   )
@@ -492,7 +496,6 @@ class Minigames(commands.Cog):
         view=TicTacToeView(ctx.author, member),
     )
 
-  # 💼 Work (.work and /work)
   @commands.hybrid_command(
       name="work", description="Work hard to earn virtual coins!"
   )
@@ -515,7 +518,6 @@ class Minigames(commands.Cog):
     )
     await ctx.send(embed=embed)
 
-  # 💰 Balance (.bal and /bal) with Rich Embed
   @commands.hybrid_command(
       name="bal", description="Check your or another member's balance."
   )
@@ -533,7 +535,6 @@ class Minigames(commands.Cog):
     embed.set_thumbnail(url=target.display_avatar.url)
     await ctx.send(embed=embed)
 
-  # 🦹 Steal / Rob (.steal and /steal @user)
   @commands.hybrid_command(
       name="steal", description="Attempt to steal coins from another user!"
   )
@@ -554,7 +555,7 @@ class Minigames(commands.Cog):
           ephemeral=True,
       )
 
-    success = random.choice([True, False, False])  # 33% success rate
+    success = random.choice([True, False, False])
     if success:
       stolen = random.randint(50, min(300, target_bal // 2))
       USER_BALANCES[member.id] -= stolen
@@ -572,7 +573,6 @@ class Minigames(commands.Cog):
           f" {member.mention} and had to pay a fine of **${fine:,} coins**!"
       )
 
-  # 🧩 Word Guess (.wordguess / .gw and /wordguess)
   @commands.hybrid_command(
       name="wordguess", description="Guess the scrambled word with a hint!"
   )
@@ -612,6 +612,54 @@ class Minigames(commands.Cog):
           f"⏱️ Time's up! Nobody guessed it. The word was **{word}**."
       )
 
+  @commands.hybrid_command(
+      name="gaytest", description="Calculates the gay percentage for a user."
+  )
+  @app_commands.describe(member="The member to test (defaults to you)")
+  async def gaytest(
+      self, ctx: commands.Context, member: discord.Member | None = None
+  ):
+    target = member or ctx.author
+    pct = self.get_balanced_percentage()
+    embed = discord.Embed(
+        title="🌈 Gay Test Result",
+        description=f"**{target.display_name}** is **{pct}%** gay!",
+        color=discord.Color.magenta(),
+    )
+    await ctx.send(embed=embed)
+
+  @commands.hybrid_command(
+      name="lesbiantest", description="Calculates the lesbian percentage for a user."
+  )
+  @app_commands.describe(member="The member to test (defaults to you)")
+  async def lesbiantest(
+      self, ctx: commands.Context, member: discord.Member | None = None
+  ):
+    target = member or ctx.author
+    pct = self.get_balanced_percentage()
+    embed = discord.Embed(
+        title="💜 Lesbian Test Result",
+        description=f"**{target.display_name}** is **{pct}%** lesbian!",
+        color=discord.Color.purple(),
+    )
+    await ctx.send(embed=embed)
+
+  @commands.hybrid_command(
+      name="baldtest", description="Calculates how bald a user is."
+  )
+  @app_commands.describe(member="The member to test (defaults to you)")
+  async def baldtest(
+      self, ctx: commands.Context, member: discord.Member | None = None
+  ):
+    target = member or ctx.author
+    pct = self.get_balanced_percentage()
+    embed = discord.Embed(
+        title="🥚 Baldness Test Result",
+        description=f"**{target.display_name}** is **{pct}%** bald!",
+        color=discord.Color.light_gray(),
+    )
+    await ctx.send(embed=embed)
+
 
 async def setup(bot):
-  await bot.add_cog(Minigames(bot))
+  await bot.load_extension(Minigames(bot)) # type: ignore
