@@ -1,185 +1,182 @@
+from datetime import timedelta
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 
-# --- DROPDOWN VIEW FOR PUNISHMENTS ---
-class PunishmentSelect(discord.ui.Select):
+# --- MODAL FOR CUSTOM TIMEOUT ---
+class TimeoutModal(discord.ui.Modal, title='Timeout Configuration'):
+  duration_minutes = discord.ui.TextInput(
+      label='Duration (in minutes)',
+      placeholder='e.g., 10, 60, 1440',
+      default='10',
+      required=True,
+  )
+  reason = discord.ui.TextInput(
+      label='Reason',
+      placeholder='Enter reason for timeout...',
+      default='No reason provided',
+      required=False,
+  )
 
   def __init__(self, target_member: discord.Member):
+    super().__init__()
     self.target_member = target_member
-    options = [
-        discord.SelectOption(
-            label='Timeout',
-            description='Timeout member for 10 minutes',
-            emoji='⏳',
-            value='timeout',
-        ),
-        discord.SelectOption(
-            label='Remove Timeout',
-            description='Remove timeout from member',
-            emoji='🔊',
-            value='untimeout',
-        ),
-        discord.SelectOption(
-            label='Kick',
-            description='Kick member from the server',
-            emoji='👢',
-            value='kick',
-        ),
-        discord.SelectOption(
-            label='Ban',
-            description='Ban member from the server',
-            emoji='🔨',
-            value='ban',
-        ),
-    ]
+
+  async def on_submit(self, interaction: discord.Interaction):
+    try:
+      mins = int(self.duration_minutes.value)
+      delta = timedelta(minutes=mins)
+      await self.target_member.timeout(
+          delta, reason=f'{self.reason.value} (By: {interaction.user})'
+      )
+      await interaction.response.send_message(
+          f'⏳ **{self.target_member.display_name}** has been timed out for'
+          f' `{mins} minutes`. Reason: *{self.reason.value}*'
+      )
+    except Exception as e:
+      await interaction.response.send_message(
+          f'❌ Failed to timeout: {e}', ephemeral=True
+      )
+
+
+# --- MODAL FOR REASON-BASED ACTIONS (Kick/Ban) ---
+class ReasonModal(discord.ui.Modal):
+  reason = discord.ui.TextInput(
+      label='Reason',
+      placeholder='Enter reason...',
+      default='No reason provided',
+      required=False,
+  )
+
+  def __init__(self, target_member: discord.Member, action_type: str):
     super().__init__(
-        placeholder='Choose a punishment action...',
-        min_values=1,
-        max_values=1,
-        options=options,
+        title=f"{action_type.capitalize()} {target_member.display_name}"
     )
+    self.target_member = target_member
+    self.action_type = action_type
 
-  async def callback(self, interaction: discord.Interaction):
-    action = self.values[0]
-    guild = interaction.guild
-
-    if action == 'timeout':
-      try:
-        from datetime import timedelta
-
-        await self.target_member.timeout(
-            timedelta(minutes=10), reason=f'Punishment menu by {interaction.user}'
-        )
-        await interaction.response.send_message(
-            f'⏳ **{self.target_member.display_name}** has been timed out for 10'
-            ' minutes.',
-            ephemeral=True,
-        )
-      except Exception as e:
-        await interaction.response.send_message(
-            f'❌ Failed to timeout: {e}', ephemeral=True
-        )
-
-    elif action == 'untimeout':
-      try:
-        await self.target_member.timeout(
-            None, reason=f'Timeout removed by {interaction.user}'
-        )
-        await interaction.response.send_message(
-            f'🔊 Timeout removed for **{self.target_member.display_name}**.',
-            ephemeral=True,
-        )
-      except Exception as e:
-        await interaction.response.send_message(
-            f'❌ Failed to remove timeout: {e}', ephemeral=True
-        )
-
-    elif action == 'kick':
-      try:
+  async def on_submit(self, interaction: discord.Interaction):
+    try:
+      if self.action_type == 'kick':
         await self.target_member.kick(
-            reason=f'Punishment menu by {interaction.user}'
+            reason=f'{self.reason.value} (By: {interaction.user})'
         )
         await interaction.response.send_message(
-            f'👢 **{self.target_member.display_name}** has been kicked.',
-            ephemeral=True,
+            f'👢 **{self.target_member.display_name}** has been kicked. Reason:'
+            f' *{self.reason.value}*'
         )
-      except Exception as e:
-        await interaction.response.send_message(
-            f'❌ Failed to kick: {e}', ephemeral=True
-        )
-
-    elif action == 'ban':
-      try:
+      elif self.action_type == 'ban':
         await self.target_member.ban(
-            reason=f'Punishment menu by {interaction.user}'
+            reason=f'{self.reason.value} (By: {interaction.user})'
         )
         await interaction.response.send_message(
-            f'🔨 **{self.target_member.display_name}** has been banned.',
-            ephemeral=True,
+            f'🔨 **{self.target_member.display_name}** has been banned. Reason:'
+            f' *{self.reason.value}*'
         )
-      except Exception as e:
+    except Exception as e:
         await interaction.response.send_message(
-            f'❌ Failed to ban: {e}', ephemeral=True
+            f'❌ Failed to execute {self.action_type}: {e}', ephemeral=True
         )
 
 
+# --- PUBLIC PUNISHMENT BUTTON VIEW ---
 class PunishmentView(discord.ui.View):
 
   def __init__(self, target_member: discord.Member):
-    super().__init__(timeout=60)
-    self.add_item(PunishmentSelect(target_member))
+    super().__init__(timeout=120)
+    self.target_member = target_member
 
+  @discord.ui.button(
+      label='Timeout', style=discord.ButtonStyle.blurple, emoji='⏳'
+  )
+  async def timeout_btn(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await interaction.response.send_modal(TimeoutModal(self.target_member))
 
-# --- DROPDOWN VIEW FOR SERVER MANAGEMENT ---
-class ManageSelect(discord.ui.Select):
-
-  def __init__(self):
-    options = [
-        discord.SelectOption(
-            label='Lockdown Channel',
-            description='Lock the current channel',
-            emoji='🔒',
-            value='lock',
-        ),
-        discord.SelectOption(
-            label='Unlock Channel',
-            description='Unlock the current channel',
-            emoji='🔓',
-            value='unlock',
-        ),
-        discord.SelectOption(
-            label='Clear Messages (Purge)',
-            description='Delete last 10 messages',
-            emoji='🧹',
-            value='purge',
-        ),
-    ]
-    super().__init__(
-        placeholder='Choose a channel management action...',
-        min_values=1,
-        max_values=1,
-        options=options,
+  @discord.ui.button(
+      label='Remove Timeout', style=discord.ButtonStyle.green, emoji='🔊'
+  )
+  async def untimeout_btn(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await self.target_member.timeout(
+        None, reason=f'Timeout removed by {interaction.user}'
+    )
+    await interaction.response.send_message(
+        f'🔊 Timeout removed for **{self.target_member.display_name}** by'
+        f' {interaction.user.mention}.'
     )
 
-  async def callback(self, interaction: discord.Interaction):
-    action = self.values[0]
-    channel = interaction.channel
+  @discord.ui.button(
+      label='Kick', style=discord.ButtonStyle.gray, emoji='👢'
+  )
+  async def kick_btn(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await interaction.response.send_modal(
+        ReasonModal(self.target_member, 'kick')
+    )
 
-    if action == 'lock':
-      await channel.set_permissions(
-          interaction.guild.default_role,
-          send_messages=False,
-          reason=f'Locked by {interaction.user}',
-      )
-      await interaction.response.send_message(
-          f'🔒 **{channel.name}** has been locked down.', ephemeral=True
-      )
-
-    elif action == 'unlock':
-      await channel.set_permissions(
-          interaction.guild.default_role,
-          send_messages=True,
-          reason=f'Unlocked by {interaction.user}',
-      )
-      await interaction.response.send_message(
-          f'🔓 **{channel.name}** has been unlocked.', ephemeral=True
-      )
-
-    elif action == 'purge':
-      deleted = await channel.purge(limit=10)
-      await interaction.response.send_message(
-          f'🧹 Cleared `{len(deleted)}` messages from this channel.',
-          ephemeral=True,
-      )
+  @discord.ui.button(label='Ban', style=discord.ButtonStyle.red, emoji='🔨')
+  async def ban_btn(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await interaction.response.send_modal(
+        ReasonModal(self.target_member, 'ban')
+    )
 
 
+# --- PUBLIC MANAGEMENT BUTTON VIEW ---
 class ManageView(discord.ui.View):
 
   def __init__(self):
-    super().__init__(timeout=60)
-    self.add_item(ManageSelect())
+    super().__init__(timeout=120)
+
+  @discord.ui.button(
+      label='Lock Channel', style=discord.ButtonStyle.red, emoji='🔒'
+  )
+  async def lock_btn(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await interaction.channel.set_permissions(
+        interaction.guild.default_role,
+        send_messages=False,
+        reason=f'Locked by {interaction.user}',
+    )
+    await interaction.response.send_message(
+        f'🔒 **{interaction.channel.name}** has been locked down by'
+        f' {interaction.user.mention}.'
+    )
+
+  @discord.ui.button(
+      label='Unlock Channel', style=discord.ButtonStyle.green, emoji='🔓'
+  )
+  async def unlock_btn(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    await interaction.channel.set_permissions(
+        interaction.guild.default_role,
+        send_messages=True,
+        reason=f'Unlocked by {interaction.user}',
+    )
+    await interaction.response.send_message(
+        f'🔓 **{interaction.channel.name}** has been unlocked by'
+        f' {interaction.user.mention}.'
+    )
+
+  @discord.ui.button(
+      label='Purge 10 Messages', style=discord.ButtonStyle.gray, emoji='🧹'
+  )
+  async def purge_btn(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    deleted = await interaction.channel.purge(limit=10)
+    await interaction.response.send_message(
+        f'🧹 Cleared `{len(deleted)}` messages by {interaction.user.mention}.',
+        ephemeral=False,
+    )
 
 
 # --- MODERATION COG ---
@@ -199,14 +196,15 @@ class Moderation(commands.Cog):
     embed = discord.Embed(
         title='🛡️ Punishment Control Panel',
         description=(
-            f'Target User: **{member.mention}** (`{member.id}`)\nSelect an'
-            ' action from the dropdown menu below to execute.'
+            f'Target User: **{member.mention}** (`{member.id}`)\nClick a button'
+            ' below to execute custom actions.'
         ),
         color=discord.Color.red(),
     )
     view = PunishmentView(member)
+    # Visible to everyone in the channel (ephemeral=False)
     await interaction.response.send_message(
-        embed=embed, view=view, ephemeral=True
+        embed=embed, view=view, ephemeral=False
     )
 
   @app_commands.command(
@@ -216,15 +214,13 @@ class Moderation(commands.Cog):
   async def manage(self, interaction: discord.Interaction):
     embed = discord.Embed(
         title='⚙️ Server & Channel Management',
-        description=(
-            'Select a management action for this channel from the dropdown'
-            ' below.'
-        ),
+        description='Click a management action for this channel below.',
         color=discord.Color.blue(),
     )
     view = ManageView()
+    # Visible to everyone in the channel (ephemeral=False)
     await interaction.response.send_message(
-        embed=embed, view=view, ephemeral=True
+        embed=embed, view=view, ephemeral=False
     )
 
 
