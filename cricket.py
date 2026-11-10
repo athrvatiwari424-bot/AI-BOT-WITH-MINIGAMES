@@ -311,6 +311,7 @@ class CricketCog(commands.Cog):
             "captain_b": None,
             "batting_first": None,
             "last_actions": {},
+            "stats": {}  # Stores runs, wickets, catches per player
         }
 
         embed = discord.Embed(
@@ -478,7 +479,7 @@ class CricketCog(commands.Cog):
             return last_action if last_action != 0 else 1
 
     async def handle_catch_system(
-        self, channel, bowling_team: list, batter_name: str
+        self, channel, bowling_team: list, batter_name: str, lobby_stats: dict
     ) -> bool:
         fielders = [p for p in bowling_team if isinstance(p, discord.User)]
         if not fielders:
@@ -501,6 +502,12 @@ class CricketCog(commands.Cog):
                 view=view,
             )
             result = await asyncio.wait_for(future, timeout=12.0)
+            if result:
+                # Track successful catch in stats
+                fname = selected_fielder.display_name
+                if fname not in lobby_stats:
+                    lobby_stats[fname] = {"runs": 0, "wickets": 0, "catches": 0}
+                lobby_stats[fname]["catches"] += 1
             return result
         except (asyncio.TimeoutError, Exception):
             await channel.send(
@@ -548,6 +555,11 @@ class CricketCog(commands.Cog):
             striker_name = striker.display_name if hasattr(striker, 'display_name') else str(striker)
             bowler_name = bowler.display_name if hasattr(bowler, 'display_name') else str(bowler)
 
+            # Initialize stats dict entries
+            for name in [striker_name, bowler_name]:
+                if name not in lobby["stats"]:
+                    lobby["stats"][name] = {"runs": 0, "wickets": 0, "catches": 0}
+
             last_bat = lobby["last_actions"].get(striker_name, 0)
             last_bowl = lobby["last_actions"].get(bowler_name, 0)
 
@@ -574,35 +586,56 @@ class CricketCog(commands.Cog):
             if bat_move == bowl_move:
                 is_out = True
                 if lobby["tournament_mode"]:
-                    is_out = await self.handle_catch_system(channel, bowling_squad, striker_name)
+                    is_out = await self.handle_catch_system(channel, bowling_squad, striker_name, lobby["stats"])
 
                 if is_out:
                     wickets += 1
                     timeline.append("🔴 W")
-                    await channel.send(f"🔴 **WICKET!** {striker_name} is OUT! Both played **{bat_move}**.")
+                    lobby["stats"][bowler_name]["wickets"] += 1
+                    
+                    wicket_embed = discord.Embed(
+                        title="🔴 WICKET FALLEN!",
+                        description=f"**{striker_name}** is OUT! Both played **{bat_move}**.",
+                        color=discord.Color.red()
+                    )
+                    await channel.send(embed=wicket_embed)
                     
                     is_team_all_out = (wickets >= len(batting_squad))
-                    out_status_text = "Their team is all out! Innings over." if is_team_all_out else "Wicket fallen!"
-
-                    # FIXED DM WICKET LOGIC: Batter is out, Bowler got the wicket
-                    await self.send_dm_safe(
-                        striker, 
-                        f"You are out!\nOpponent's last action -> {bowl_move}\nScore: {total_runs} ({balls_bowled})\n{out_status_text}"
-                    )
-                    await self.send_dm_safe(
-                        bowler, 
-                        f"Opponent is out!\nOpponent's last action -> {bat_move}\nOpponent score: {total_runs} ({balls_bowled})\n{out_status_text}"
-                    )
+                    
+                    if is_team_all_out:
+                        await self.send_dm_safe(
+                            striker, 
+                            f"You are out!\nOpponent's last action -> {bowl_move}\nScore: {total_runs} ({balls_bowled})\nYour team is all out! Innings over.\nInnings over."
+                        )
+                        await self.send_dm_safe(
+                            bowler, 
+                            f"Opponent is out!\nOpponent's last action -> {bat_move}\nOpponent score: {total_runs} ({balls_bowled})\nTheir team is all out! Innings over.\nInnings over."
+                        )
+                    else:
+                        await self.send_dm_safe(striker, f"You are out!\nOpponent's last action -> {bowl_move}\nScore: {total_runs} ({balls_bowled})")
+                        await self.send_dm_safe(bowler, f"Opponent is out!\nOpponent's last action -> {bat_move}\nOpponent score: {total_runs} ({balls_bowled})")
 
                     striker_idx = max(striker_idx, non_striker_idx) + 1
                 else:
                     total_runs += bat_move
+                    lobby["stats"][striker_name]["runs"] += bat_move
                     timeline.append(str(bat_move))
-                    await channel.send(f"🏏 Catch dropped! {striker_name} scores **{bat_move}** runs!")
+                    drop_embed = discord.Embed(
+                        title="🏏 Catch Dropped!",
+                        description=f"{striker_name} survives and scores **{bat_move}** runs!",
+                        color=discord.Color.orange()
+                    )
+                    await channel.send(embed=drop_embed)
             else:
                 total_runs += bat_move
+                lobby["stats"][striker_name]["runs"] += bat_move
                 timeline.append(str(bat_move))
-                await channel.send(f"⚡ **{striker_name}** played **{bat_move}** | **{bowler_name}** bowled **{bowl_move}** | Runs: **{total_runs}/{wickets}** ({overs_completed} overs)")
+                ball_embed = discord.Embed(
+                    title="⚡ Ball Update",
+                    description=f"**{striker_name}** played **{bat_move}** | **{bowler_name}** bowled **{bowl_move}**\nRuns: **{total_runs}/{wickets}** ({overs_completed} overs)",
+                    color=discord.Color.blue()
+                )
+                await channel.send(embed=ball_embed)
 
                 if bat_move % 2 != 0 and non_striker_idx < len(batting_squad):
                     striker_idx, non_striker_idx = non_striker_idx, striker_idx
@@ -619,16 +652,36 @@ class CricketCog(commands.Cog):
                 timeline=timeline[-10:],
                 team_a_txt=f"{total_runs}/{wickets} ({overs_completed} overs) (RR: {rr})",
                 team_b_txt="Target / Stats tracking...",
-                batter_txt=f"{striker_name}: {total_runs} runs",
-                bowler_txt=f"{bowler_name}: {wickets} wickets",
+                batter_txt=f"{striker_name}: {lobby['stats'][striker_name]['runs']} runs",
+                bowler_txt=f"{bowler_name}: {lobby['stats'][bowler_name]['wickets']} wickets",
             )
             await status_msg.edit(embed=updated_embed)
 
-        # Innings Over DM notification
         await self.send_dm_safe(striker, "Innings over.")
         await self.send_dm_safe(bowler, "Innings over.")
 
         return total_runs, wickets
+
+    def calculate_man_of_the_match(self, lobby_data) -> str:
+        """Analyzes all player stats to choose Man of the Match."""
+        stats = lobby_data["stats"]
+        if not stats:
+            return "None"
+
+        best_player = None
+        best_score = -1
+
+        for p_name, data in stats.items():
+            # Performance weighting: Runs (1pt), Wickets (20pts), Catches (15pts if tournament mode)
+            score = data["runs"] + (data["wickets"] * 20)
+            if lobby_data["tournament_mode"]:
+                score += data["catches"] * 15
+
+            if score > best_score:
+                best_score = score
+                best_player = p_name
+
+        return best_player or "None"
 
     async def run_full_match(self, channel, lobby):
         team_a_squad = lobby["team_a"]
@@ -646,30 +699,51 @@ class CricketCog(commands.Cog):
             bat1_squad, bowl1_squad = team_b_squad, team_a_squad
             name1, name2 = team_b_name, team_a_name
 
-        await channel.send(f"🏟️ **Innings ONE Started!**\nBatting: **{name1}** | Bowling: **{name2}**")
+        start_emb1 = discord.Embed(title="🏟️ Innings ONE Started!", description=f"Batting: **{name1}** | Bowling: **{name2}**", color=discord.Color.green())
+        await channel.send(embed=start_emb1)
+        
         score1, wickets1 = await self.play_innings(channel, lobby, bat1_squad, bowl1_squad, name1, name2, "ONE", is_innings_two=False)
 
         target = score1 + 1
-        await channel.send(f"🏁 **Innings 1 Over!**\n**{name1}** scored **{score1}/{wickets1}**.\nTarget for **{name2}**: **{target}** runs.")
+        end_emb1 = discord.Embed(
+            title="🏁 Innings 1 Over!",
+            description=f"**{name1}** scored **{score1}/{wickets1}**.\nTarget for **{name2}**: **{target}** runs.",
+            color=discord.Color.gold()
+        )
+        await channel.send(embed=end_emb1)
 
         await asyncio.sleep(3)
-        await channel.send(f"🚀 **Innings TWO Starting in 5 seconds!** Target: {target} runs.")
+        start_emb2_notice = discord.Embed(title="🚀 Innings TWO Starting in 5 seconds!", description=f"Target: {target} runs.", color=discord.Color.blue())
+        await channel.send(embed=start_emb2_notice)
         await asyncio.sleep(5)
 
-        # Innings 2 - Swap roles
-        await channel.send(f"🏟️ **Innings TWO Started!**\nBatting: **{name2}** | Bowling: **{name1}**")
+        start_emb2 = discord.Embed(title="🏟️ Innings TWO Started!", description=f"Batting: **{name2}** | Bowling: **{name1}**", color=discord.Color.green())
+        await channel.send(embed=start_emb2)
+        
         score2, wickets2 = await self.play_innings(channel, lobby, bowl1_squad, bat1_squad, name2, name1, "TWO", is_innings_two=True, target_score=target)
 
-        # Match Result
+        # Match Result Analysis & Man of the Match
         if score2 >= target:
             winner = name2
-            await channel.send(f"🎉 **{winner} won the game by chasing the target!** 🏆")
+            res_desc = f"🎉 **{winner} won the game by chasing the target!** 🏆"
         elif score2 == score1:
-            await channel.send(f"🤝 **The match is a tie!**")
+            res_desc = f"🤝 **The match is a tie!**"
         else:
             winner = name1
             margin = score1 - score2
-            await channel.send(f"🏆 **{winner} won the game by {margin} runs!** 🥇")
+            res_desc = f"🏆 **{winner} won the game by {margin} runs!** 🥇"
+
+        motm = self.calculate_man_of_the_match(lobby)
+        res_desc += f"\n\n⭐ **Man of the Match**: **{motm}** 🎖️"
+
+        result_embed = discord.Embed(title="🏁 MATCH OVER", description=res_desc, color=discord.Color.gold())
+        await channel.send(embed=result_embed)
+
+        # Announce Match Over in DMs as well
+        all_participants = lobby["players"]
+        for p in all_participants:
+            if isinstance(p, discord.User) or isinstance(p, discord.Member):
+                await self.send_dm_safe(p, f"Match Over! Result:\n{res_desc.replace('**', '')}")
 
         del self.lobbies[channel.id]
 
