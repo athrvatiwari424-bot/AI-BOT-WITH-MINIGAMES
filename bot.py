@@ -162,3 +162,27 @@ async def ping(ctx):
 
 if __name__ == '__main__':
   bot.run(token)
+import http.server
+import socketserver
+import threading
+
+# --- RENDER PORT BINDING FIX ---
+PORT = int(os.environ.get('PORT', 10000))
+
+
+class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+
+  def do_GET(self):
+    self.send_response(200)
+    self.end_headers()
+    self.wfile.write(b'Bot is active and running!')
+
+
+def run_web_server():
+  with socketserver.TCPServer(('', PORT), HealthCheckHandler) as httpd:
+    logging.info(f'Health check web server running on port {PORT}')
+    httpd.serve_forever()
+
+
+# Start the web server in a background thread so it satisfies Render's port scanner
+threading.Thread(target=run_web_server, daemon=True).start()
