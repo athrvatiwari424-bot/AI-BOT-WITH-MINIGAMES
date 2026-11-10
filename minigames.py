@@ -46,7 +46,7 @@ class MiniGames(commands.Cog):
   @app_commands.command(
       name="work", description="Work hard to earn some OwO economy currency!"
   )
-  @app_commands.cooldown(1, 30, commands.BucketType.user)
+  @app_commands.checks.cooldown(1, 30)
   async def work(self, interaction: discord.Interaction):
     earnings = random.randint(50, 250)
     current_bal = await self.get_balance(interaction.user.id)
@@ -87,7 +87,6 @@ class MiniGames(commands.Cog):
           "❌ You cannot play against yourself or a bot!", ephemeral=True
       )
 
-    # Simple placeholder response for Tic-Tac-Toe initiation
     await interaction.response.send_message(
         f"🎮 Tic-Tac-Toe challenge sent from {interaction.user.mention} to"
         f" {opponent.mention}!"
