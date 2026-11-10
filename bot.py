@@ -61,6 +61,11 @@ def is_bot_owner():
 @bot.event
 async def on_ready():
   try:
+    await bot.load_extension("minigames")
+    print("Loaded 50+ Minigames Extension!")
+  except Exception as e:
+    print(f"Minigames failed or already loaded: {e}")
+    try:
     synced = await bot.tree.sync()
     print(f"Successfully synced {len(synced)} slash command(s) globally!")
   except Exception as e:
