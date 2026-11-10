@@ -75,9 +75,38 @@ class ReasonModal(discord.ui.Modal):
             f' *{self.reason.value}*'
         )
     except Exception as e:
+      await interaction.response.send_message(
+          f'❌ Failed to execute {self.action_type}: {e}', ephemeral=True
+      )
+
+
+# --- MODAL FOR CUSTOM PURGE ---
+class PurgeModal(discord.ui.Modal, title='Custom Purge'):
+  amount = discord.ui.TextInput(
+      label='Number of messages to delete',
+      placeholder='e.g., 25, 50, 100',
+      default='10',
+      required=True,
+  )
+
+  async def on_submit(self, interaction: discord.Interaction):
+    try:
+      limit = int(self.amount.value)
+      if limit < 1:
         await interaction.response.send_message(
-            f'❌ Failed to execute {self.action_type}: {e}', ephemeral=True
+            '❌ Please specify a number greater than 0.', ephemeral=True
         )
+        return
+
+      deleted = await interaction.channel.purge(limit=limit)
+      await interaction.response.send_message(
+          f'🧹 Cleared `{len(deleted)}` messages by {interaction.user.mention}.',
+          ephemeral=False,
+      )
+    except Exception as e:
+      await interaction.response.send_message(
+          f'❌ Failed to purge messages: {e}', ephemeral=True
+      )
 
 
 # --- PUBLIC PUNISHMENT BUTTON VIEW ---
@@ -167,16 +196,12 @@ class ManageView(discord.ui.View):
     )
 
   @discord.ui.button(
-      label='Purge 10 Messages', style=discord.ButtonStyle.gray, emoji='🧹'
+      label='Custom Purge', style=discord.ButtonStyle.gray, emoji='🧹'
   )
   async def purge_btn(
       self, interaction: discord.Interaction, button: discord.ui.Button
   ):
-    deleted = await interaction.channel.purge(limit=10)
-    await interaction.response.send_message(
-        f'🧹 Cleared `{len(deleted)}` messages by {interaction.user.mention}.',
-        ephemeral=False,
-    )
+    await interaction.response.send_modal(PurgeModal())
 
 
 # --- MODERATION COG ---
@@ -202,7 +227,6 @@ class Moderation(commands.Cog):
         color=discord.Color.red(),
     )
     view = PunishmentView(member)
-    # Visible to everyone in the channel (ephemeral=False)
     await interaction.response.send_message(
         embed=embed, view=view, ephemeral=False
     )
@@ -218,9 +242,58 @@ class Moderation(commands.Cog):
         color=discord.Color.blue(),
     )
     view = ManageView()
-    # Visible to everyone in the channel (ephemeral=False)
     await interaction.response.send_message(
         embed=embed, view=view, ephemeral=False
+    )
+
+  @app_commands.command(
+      name='nuke',
+      description='Clone and delete the current channel to completely wipe messages',
+  )
+  @app_commands.checks.has_permissions(manage_channels=True)
+  async def nuke(self, interaction: discord.Interaction):
+    await interaction.response.send_message(
+        '💣 Nuking channel...', ephemeral=True
+    )
+    channel = interaction.channel
+    new_channel = await channel.clone(reason=f'Nuked by {interaction.user}')
+    await new_channel.edit(position=channel.position)
+    await channel.delete(reason=f'Nuked by {interaction.user}')
+    await new_channel.send(
+        f'💥 **Channel has been successfully nuked!** Action executed by'
+        f' {interaction.user.mention}.'
+    )
+
+  @app_commands.command(
+      name='red_button',
+      description='🚨 DO NOT PRESS - Nightmare Mode (Lockdown & Strip Permissions)',
+  )
+  @app_commands.checks.has_permissions(administrator=True)
+  async def red_button(self, interaction: discord.Interaction):
+    await interaction.response.send_message(
+        '🚨 **NIGHTMARE MODE ACTIVATED!** Stripping server channel'
+        ' permissions...',
+        ephemeral=False,
+    )
+    guild = interaction.guild
+
+    for channel in guild.channels:
+      try:
+        overwrite = channel.overwrites_for(guild.default_role)
+        overwrite.send_messages = False
+        overwrite.connect = False
+        overwrite.speak = False
+        await channel.set_permissions(
+            guild.default_role,
+            overwrite=overwrite,
+            reason=f'Nightmare Mode Red Button pressed by {interaction.user}',
+        )
+      except Exception:
+        pass
+
+    await interaction.followup.send(
+        '🔴 **The Red Button has been pulled.** All standard channels have'
+        ' been completely locked down. Only administrators can speak or write.'
     )
 
 
