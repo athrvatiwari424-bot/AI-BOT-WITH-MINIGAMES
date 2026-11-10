@@ -235,56 +235,6 @@ class CatchOptionButton(discord.ui.Button):
         view.stop()
 
 
-class PlayActionView(discord.ui.View):
-    def __init__(self, player_id: int, last_action: int):
-        super().__init__(timeout=15)
-        self.player_id = player_id
-        self.last_action = last_action
-        self.selected_value = None
-
-    @discord.ui.button(label="1", style=discord.ButtonStyle.secondary, row=0)
-    async def btn1(self, interaction: discord.Interaction, button):
-        await self.process_click(interaction, 1)
-
-    @discord.ui.button(label="2", style=discord.ButtonStyle.secondary, row=0)
-    async def btn2(self, interaction: discord.Interaction, button):
-        await self.process_click(interaction, 2)
-
-    @discord.ui.button(label="3", style=discord.ButtonStyle.secondary, row=0)
-    async def btn3(self, interaction: discord.Interaction, button):
-        await self.process_click(interaction, 3)
-
-    @discord.ui.button(label="4", style=discord.ButtonStyle.primary, row=1)
-    async def btn4(self, interaction: discord.Interaction, button):
-        await self.process_click(interaction, 4)
-
-    @discord.ui.button(label="5", style=discord.ButtonStyle.secondary, row=1)
-    async def btn5(self, interaction: discord.Interaction, button):
-        await self.process_click(interaction, 5)
-
-    @discord.ui.button(label="6", style=discord.ButtonStyle.success, row=1)
-    async def btn6(self, interaction: discord.Interaction, button):
-        await self.process_click(interaction, 6)
-
-    async def process_click(self, interaction: discord.Interaction, value: int):
-        if interaction.user.id != self.player_id:
-            return await interaction.response.send_message(
-                "Not your control panel!", ephemeral=True
-            )
-        self.selected_value = value
-        for child in self.children:
-            child.disabled = True
-        await interaction.response.edit_message(
-            content=f"Selected **{value}** ✅", view=view if 'view' in locals() else self
-        )
-        self.stop()
-
-    async def on_timeout(self):
-        if self.selected_value is None:
-            self.selected_value = self.last_action if self.last_action != 0 else 1
-        self.stop()
-
-
 class CricketCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -296,12 +246,11 @@ class CricketCog(commands.Cog):
         innings: str,
         overs_str: str,
         host_name: str,
-        timeline: str,
+        timeline: list,
         team_a_txt: str,
         team_b_txt: str,
         batter_txt: str,
         bowler_txt: str,
-        status_subtext: str = "",
     ) -> discord.Embed:
         embed = discord.Embed(color=discord.Color.from_rgb(32, 34, 37))
         embed.set_author(name=match_title, icon_url=self.bot.user.display_avatar.url if self.bot.user else None)
@@ -310,14 +259,16 @@ class CricketCog(commands.Cog):
         embed.add_field(name="Overs", value=overs_str, inline=True)
         embed.add_field(name="Host", value=host_name, inline=True)
 
-        embed.add_field(name="Timeline", value=timeline or "----------------", inline=False)
+        timeline_display = " ".join(timeline) if timeline else "----------------"
+        embed.add_field(name="Timeline", value=timeline_display, inline=False)
+        
         embed.add_field(name="Team A", value=team_a_txt, inline=False)
         embed.add_field(name="Team B", value=team_b_txt, inline=False)
         embed.add_field(name="Batter", value=batter_txt, inline=False)
         embed.add_field(name="Bowler", value=bowler_txt, inline=False)
 
         embed.set_image(url="https://media.tenor.com/images/3a958e82110c4d320921e42dd503d526/tenor.gif")
-        embed.set_footer(text=f"LIVE ● {status_subtext}")
+        embed.set_footer(text="LIVE ●")
         return embed
 
     @app_commands.command(name="create", description="Create a Hand Cricket match lobby.")
@@ -474,9 +425,9 @@ class CricketCog(commands.Cog):
         await interaction.response.send_message(
             "Match is starting! Initializing live dashboard..."
         )
-        await self.run_match_loop(interaction.channel, lobby)
+        await self.run_full_match(interaction.channel, lobby)
 
-    async def get_player_input(
+    async def get_typing_input(
         self, channel, player, role: str, last_action: int, opponent_last_action: int, current_score: int, target_runs: int, balls_left: int, wickets_left: int
     ) -> int:
         if isinstance(player, str):
@@ -484,83 +435,105 @@ class CricketCog(commands.Cog):
             return random.randint(1, 6)
 
         try:
-            view = PlayActionView(player.id, last_action)
             dm_text = (
                 f"**Match Status**\n"
                 f"Opponent's last action -> {opponent_last_action}\n"
-                f"Score: {current_score} (Balls faced: ...)\n\n"
+                f"Score: {current_score}\n"
                 f"Runs left: {target_runs} | Balls left: {balls_left} | Wickets left: {wickets_left}\n\n"
-                f"You are **{role}**! Select your action (Respond within 15 seconds):"
+                f"You are **{role}**! Type a number between **1 and 6** in your DMs within 15 seconds:"
             )
-            await player.send(dm_text, view=view)
-            await view.wait()
-            return view.selected_value
+            await player.send(dm_text)
+
+            def check(m):
+                return m.author.id == player.id and isinstance(m.channel, discord.DMChannel) and m.content.isdigit() and 1 <= int(m.content) <= 6
+
+            msg = await self.bot.wait_for('message', timeout=15.0, check=check)
+            return int(msg.content)
+        except asyncio.TimeoutError:
+            try:
+                await player.send("⌛ Time expired! Repeating your previous action.")
+            except Exception:
+                pass
+            return last_action if last_action != 0 else 1
         except Exception:
             return last_action if last_action != 0 else 1
 
-    async def run_match_loop(self, channel, lobby):
-        batting_team_name = lobby["batting_first"]
-        bowling_team_name = (
-            lobby["team_b_name"]
-            if batting_team_name == lobby["team_a_name"]
-            else lobby["team_a_name"]
+    async def handle_catch_system(
+        self, channel, bowling_team: list, batter_name: str
+    ) -> bool:
+        fielders = [p for p in bowling_team if isinstance(p, discord.User)]
+        if not fielders:
+            return True
+
+        selected_fielder = random.choice(fielders)
+        correct_spot = random.randint(1, 3)
+
+        await channel.send(
+            f"🚨 **CHANCE OF WICKET!**\nA catch opportunity is coming toward {selected_fielder.mention}!\nIf {selected_fielder.mention} takes this catch, **{batter_name}** will be out!"
         )
 
-        batting_squad = list(
-            lobby["team_a"]
-            if batting_team_name == lobby["team_a_name"]
-            else lobby["team_b"]
-        )
-        bowling_squad = list(
-            lobby["team_b"]
-            if batting_team_name == lobby["team_a_name"]
-            else lobby["team_a"]
-        )
+        loop = asyncio.get_event_loop()
+        future = loop.create_future()
+        view = CatchDMView(selected_fielder.id, correct_spot, future)
 
+        try:
+            await selected_fielder.send(
+                f"⚡ **CATCH OPPORTUNITY!** Pick the correct spot (1, 2, or 3) to catch out **{batter_name}**:",
+                view=view,
+            )
+            result = await asyncio.wait_for(future, timeout=12.0)
+            return result
+        except (asyncio.TimeoutError, Exception):
+            await channel.send(
+                f"❌ {selected_fielder.mention} couldn't reach the ball in time! Catch dropped."
+            )
+            return False
+
+    async def play_innings(self, channel, lobby, batting_squad, bowling_squad, batting_team_name, bowling_team_name, innings_label, target_score=None):
         max_balls = lobby["overs"] * 6
         total_runs = 0
         wickets = 0
         balls_bowled = 0
-
+        timeline = []
         striker_idx = 0
         non_striker_idx = 1 if len(batting_squad) > 1 else 0
 
         guild_name = channel.guild.name if channel.guild else "Cricket Match"
         embed = self.build_match_embed(
             match_title=guild_name,
-            innings="ONE",
+            innings=innings_label,
             overs_str=f"0.0 / {lobby['overs']}.0",
             host_name=lobby["host"].name,
-            timeline="",
-            team_a_txt="0/0 (0.0 overs) (RR: 0.0)",
-            team_b_txt="0/0 (0.0 overs) (RR: 0.0)",
-            batter_txt="Waiting for first ball...",
+            timeline=timeline,
+            team_a_txt=f"{batting_team_name}: 0/0 (0.0 overs)",
+            team_b_txt=f"{bowling_team_name}: 0/0 (0.0 overs)",
+            batter_txt="Starting...",
             bowler_txt="Ready...",
         )
         status_msg = await channel.send(embed=embed)
 
         while balls_bowled < max_balls and wickets < len(batting_squad):
+            if target_score is not None and total_runs >= target_score:
+                break
+
             striker = batting_squad[striker_idx]
             bowler = bowling_squad[balls_bowled % len(bowling_squad)]
 
-            striker_name = (
-                striker if isinstance(striker, str) else striker.display_name
-            )
-            bowler_name = (
-                bowler if isinstance(bowler, str) else bowler.display_name
-            )
+            striker_name = striker if isinstance(striker, str) else striker.display_name
+            bowler_name = bowler if isinstance(bowler, str) else bowler.display_name
 
             last_bat = lobby["last_actions"].get(striker_name, 0)
             last_bowl = lobby["last_actions"].get(bowler_name, 0)
 
             balls_remaining = max_balls - balls_bowled
             wickets_remaining = len(batting_squad) - wickets
+            runs_needed = (target_score - total_runs) if target_score else 0
 
-            bat_move = await self.get_player_input(
-                channel, striker, "BATTER", last_bat, last_bowl, total_runs, max(0, total_runs + 1 - total_runs), balls_remaining, wickets_remaining
+            bat_move = await self.get_typing_input(
+                channel, striker, "BATTER", last_bat, last_bowl, total_runs, runs_needed, balls_remaining, wickets_remaining
             )
-            bowl_move = await self.get_player_input(
-                channel, bowler, "BOWLER", last_bowl, bat_move, 0, 0, balls_remaining, wickets_remaining
+            bowl_move = await self.get_typing_input(
+                channel, bowler, "BOWLER", last_bowl, bat_move, 0, runs_needed, balls_remaining, wickets_remaining
             )
 
             lobby["last_actions"][striker_name] = bat_move
@@ -570,38 +543,86 @@ class CricketCog(commands.Cog):
             overs_completed = f"{balls_bowled//6}.{balls_bowled%6}"
             rr = round(total_runs / (balls_bowled / 6), 2) if balls_bowled > 0 else 0.0
 
-            timeline_str = f"{bat_move} | {bowl_move}"
-
             if bat_move == bowl_move:
-                wickets += 1
-                timeline_str += " 🔴 W"
-                await channel.send(
-                    f"🔴 **WICKET!** {striker_name} is OUT! Both played **{bat_move}**."
-                )
-                striker_idx = max(striker_idx, non_striker_idx) + 1
+                is_out = True
+                if lobby["tournament_mode"]:
+                    is_out = await self.handle_catch_system(channel, bowling_squad, striker_name)
+
+                if is_out:
+                    wickets += 1
+                    timeline.append("🔴 W")
+                    await channel.send(f"🔴 **WICKET!** {striker_name} is OUT! Both played **{bat_move}**.")
+                    striker_idx = max(striker_idx, non_striker_idx) + 1
+                else:
+                    total_runs += bat_move
+                    timeline.append(str(bat_move))
+                    await channel.send(f"🏏 Catch dropped! {striker_name} scores **{bat_move}** runs!")
             else:
                 total_runs += bat_move
-                await channel.send(
-                    f"⚡ **{striker_name}** played **{bat_move}** | **{bowler_name}** bowled **{bowl_move}** | Runs: **{total_runs}/{wickets}** ({overs_completed} overs)"
-                )
+                timeline.append(str(bat_move))
+                await channel.send(f"⚡ **{striker_name}** played **{bat_move}** | **{bowler_name}** bowled **{bowl_move}** | Runs: **{total_runs}/{wickets}** ({overs_completed} overs)")
+
+                if bat_move % 2 != 0 and non_striker_idx < len(batting_squad):
+                    striker_idx, non_striker_idx = non_striker_idx, striker_idx
+
+            if balls_bowled % 6 == 0 and non_striker_idx < len(batting_squad):
+                striker_idx, non_striker_idx = non_striker_idx, striker_idx
 
             updated_embed = self.build_match_embed(
                 match_title=guild_name,
-                innings="ONE",
+                innings=innings_label,
                 overs_str=f"{overs_completed} / {lobby['overs']}.0",
                 host_name=lobby["host"].name,
-                timeline=timeline_str,
+                timeline=timeline[-10:],  # Keep last 10 entries in timeline view
                 team_a_txt=f"{total_runs}/{wickets} ({overs_completed} overs) (RR: {rr})",
-                team_b_txt="0/0 (0.0 overs) (RR: 0.0)",
+                team_b_txt="Target / Stats tracking...",
                 batter_txt=f"{striker_name}: {total_runs} runs",
                 bowler_txt=f"{bowler_name}: {wickets} wickets",
             )
             await status_msg.edit(embed=updated_embed)
 
-        target = total_runs + 1
-        await channel.send(
-            f"🏁 **Innings Over!**\n**{batting_team_name}** scored **{total_runs}/{wickets}**.\nTarget for **{bowling_team_name}**: **{target}** runs."
-        )
+        return total_runs, wickets
+
+    async def run_full_match(self, channel, lobby):
+        team_a_squad = lobby["team_a"]
+        team_b_squad = lobby["team_b"]
+
+        team_a_name = lobby["team_a_name"]
+        team_b_name = lobby["team_b_name"]
+
+        batting_first = lobby["batting_first"]
+        
+        if batting_first == team_a_name:
+            bat1_squad, bowl1_squad = team_a_squad, team_b_squad
+            name1, name2 = team_a_name, team_b_name
+        else:
+            bat1_squad, bowl1_squad = team_b_squad, team_a_squad
+            name1, name2 = team_b_name, team_a_name
+
+        await channel.send(f"🏟️ **Innings ONE Started!**\nBatting: **{name1}** | Bowling: **{name2}**")
+        score1, wickets1 = await self.play_innings(channel, lobby, bat1_squad, bowl1_squad, name1, name2, "ONE")
+
+        target = score1 + 1
+        await channel.send(f"🏁 **Innings 1 Over!**\n**{name1}** scored **{score1}/{wickets1}**.\nTarget for **{name2}**: **{target}** runs.")
+
+        await asyncio.sleep(3)
+        await channel.send(f"🚀 **Innings TWO Starting in 5 seconds!** Target: {target} runs.")
+        await asyncio.sleep(5)
+
+        # Innings 2 - Swap roles
+        await channel.send(f"🏟️ **Innings TWO Started!**\nBatting: **{name2}** | Bowling: **{name1}**")
+        score2, wickets2 = await self.play_innings(channel, lobby, bowl1_squad, bat1_squad, name2, name1, "TWO", target_score=target)
+
+        # Match Result
+        if score2 >= target:
+            winner = name2
+            await channel.send(f"🎉 **{winner} won the game by chasing the target!** 🏆")
+        elif score2 == score1:
+            await channel.send(f"🤝 **The match is a tie!**")
+        else:
+            winner = name1
+            margin = score1 - score2
+            await channel.send(f"🏆 **{winner} won the game by {margin} runs!** 🥇")
 
         del self.lobbies[channel.id]
 
