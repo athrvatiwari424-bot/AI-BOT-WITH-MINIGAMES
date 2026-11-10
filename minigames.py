@@ -4,8 +4,58 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+ACTIVE_LOBBIES = {}
+USER_BALANCES = {}
 
-# --- 1. TEAM HAND CRICKET ENGINE ---
+
+# --- 1. TEAM HAND CRICKET ENGINE (WITH GIFs) ---
+class CricketSetupView(discord.ui.View):
+
+  def __init__(self, game):
+    super().__init__(timeout=60)
+    self.game = game
+
+  @discord.ui.button(
+      label="Join Team A (1️⃣)", style=discord.ButtonStyle.primary
+  )
+  async def join_a(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    user = interaction.user
+    if user in self.game.team_b:
+      self.game.team_b.remove(user)
+    if user not in self.game.team_a:
+      self.game.team_a.append(user)
+      self.game.init_player(user)
+      await interaction.response.send_message(
+          f"✅ {user.mention} joined **Team A**!", ephemeral=True
+      )
+    else:
+      await interaction.response.send_message(
+          "You are already in Team A!", ephemeral=True
+      )
+
+  @discord.ui.button(
+      label="Join Team B (2️⃣)", style=discord.ButtonStyle.secondary
+  )
+  async def join_b(
+      self, interaction: discord.Interaction, button: discord.ui.Button
+  ):
+    user = interaction.user
+    if user in self.game.team_a:
+      self.game.team_a.remove(user)
+    if user not in self.game.team_b:
+      self.game.team_b.append(user)
+      self.game.init_player(user)
+      await interaction.response.send_message(
+          f"✅ {user.mention} joined **Team B**!", ephemeral=True
+      )
+    else:
+      await interaction.response.send_message(
+          "You are already in Team B!", ephemeral=True
+      )
+
+
 class CricketButtons(discord.ui.View):
 
   def __init__(self, player):
@@ -18,7 +68,7 @@ class CricketButtons(discord.ui.View):
   async def interaction_check(self, interaction: discord.Interaction) -> bool:
     if interaction.user != self.player:
       await interaction.response.send_message(
-          "This is not your turn to play!", ephemeral=True
+          "Not your turn!", ephemeral=True
       )
       return False
     return True
@@ -56,8 +106,15 @@ class TeamCricketGame:
     self.wickets = {"TEAM A": 0, "TEAM B": 0}
     self.balls = {"TEAM A": 0, "TEAM B": 0}
     self.stats = {}
-    # Dynamically grab your server name!
     self.server_name = ctx.guild.name if ctx.guild else "NOTTYAMERICA"
+    self.bot_counter = 1
+    self.match_started = False
+    # Cinematic Cricket GIFs
+    self.gifs = [
+        "https://media.giphy.com/media/l0HlRnAWXxn0MhOBK/giphy.gif",
+        "https://media.giphy.com/media/3oKIPnAiaMCws8nOsE/giphy.gif",
+        "https://media.giphy.com/media/3o7TKSjRrfIPjeiVyM/giphy.gif",
+    ]
 
   def init_player(self, user):
     if user not in self.stats:
@@ -69,72 +126,58 @@ class TeamCricketGame:
           "balls_bowled": 0,
       }
 
+  def add_bot(self, team_side):
+    bot_name = f"Bot{self.bot_counter}"
+    self.bot_counter += 1
+    self.init_player(bot_name)
+
+    if team_side.lower() in ["a", "team_a", "teama"]:
+      if len(self.team_a) < self.players_per_team:
+        self.team_a.append(bot_name)
+        return bot_name
+    elif team_side.lower() in ["b", "team_b", "teamb"]:
+      if len(self.team_b) < self.players_per_team:
+        self.team_b.append(bot_name)
+        return bot_name
+    return None
+
   async def start_match(self):
+    ACTIVE_LOBBIES[self.ctx.channel.id] = self
     self.team_a.append(self.ctx.author)
     self.init_player(self.ctx.author)
 
+    view = CricketSetupView(self)
     embed = discord.Embed(
-        title=f"🏏 {self.server_name} — TEAM HAND CRICKET MATCH SETUP",
+        title=f"🏏 {self.server_name} — TEAM HAND CRICKET LOBBY",
         description=(
             f"**Host:** {self.ctx.author.mention}\n"
             f"**Overs:** {self.overs} | **Players per Team:**"
             f" {self.players_per_team}\n\n"
-            "React with 1️⃣ to join **TEAM A**\n"
-            "React with 2️⃣ to join **TEAM B**\n"
-            "*Missing slots will automatically be filled with Bots!*"
+            "Click the buttons below to join **Team A** or **Team B**.\n"
+            "Host can manually add bots using `/addbot a` or `/addbot b`!\n\n"
+            "*Match will start automatically when teams are full, or timeout in"
+            " 60s.*"
         ),
         color=discord.Color.blue(),
     )
-    msg = await self.ctx.send(embed=embed)
-    await msg.add_reaction("1️⃣")
-    await msg.add_reaction("2️⃣")
+    embed.set_image(url=random.choice(self.gifs))
+    msg = await self.ctx.send(embed=embed, view=view)
 
-    def check(reaction, user):
-      return (
-          user != self.ctx.bot.user
-          and str(reaction.emoji) in ["1️⃣", "2️⃣"]
-          and reaction.message.id == msg.id
-      )
-
-    end_time = asyncio.get_event_loop().time() + 15.0
-    while asyncio.get_event_loop().time() < end_time:
-      try:
-        remaining = end_time - asyncio.get_event_loop().time()
-        reaction, user = await self.ctx.bot.wait_for(
-            "reaction_add", timeout=max(0.5, remaining), check=check
-        )
-        self.init_player(user)
-        if (
-            str(reaction.emoji) == "1️⃣"
-            and user not in self.team_a
-            and user not in self.team_b
-        ):
-          if len(self.team_a) < self.players_per_team:
-            self.team_a.append(user)
-            await self.ctx.send(f"✅ {user.mention} joined **TEAM A**")
-        elif (
-            str(reaction.emoji) == "2️⃣"
-            and user not in self.team_b
-            and user not in self.team_a
-        ):
-          if len(self.team_b) < self.players_per_team:
-            self.team_b.append(user)
-            await self.ctx.send(f"✅ {user.mention} joined **TEAM B**")
-      except asyncio.TimeoutError:
+    while (
+        len(self.team_a) < self.players_per_team
+        or len(self.team_b) < self.players_per_team
+    ):
+      if self.match_started:
         break
+      await asyncio.sleep(1)
 
-    bot_counter = 1
-    while len(self.team_a) < self.players_per_team:
-      bot_name = f"Bot{bot_counter}"
-      self.team_a.append(bot_name)
-      self.init_player(bot_name)
-      bot_counter += 1
+    if self.ctx.channel.id in ACTIVE_LOBBIES:
+      del ACTIVE_LOBBIES[self.ctx.channel.id]
 
-    while len(self.team_b) < self.players_per_team:
-      bot_name = f"Bot{bot_counter}"
-      self.team_b.append(bot_name)
-      self.init_player(bot_name)
-      bot_counter += 1
+    try:
+      await msg.edit(view=None)
+    except Exception:
+      pass
 
     await self.ctx.send(
         "🚀 **Teams locked!**\n"
@@ -224,6 +267,7 @@ class TeamCricketGame:
           ),
           color=discord.Color.dark_purple(),
       )
+      embed.set_image(url=random.choice(self.gifs))
       await self.ctx.send(embed=embed)
 
   async def get_move(self, player, role):
@@ -274,6 +318,7 @@ class TeamCricketGame:
         ),
         color=discord.Color.green(),
     )
+    embed.set_image(url="https://media.giphy.com/media/l0HlRnAWXxn0MhOBK/giphy.gif")
     await self.ctx.send(content=win_str, embed=embed)
 
 
@@ -367,7 +412,7 @@ class TicTacToeView(discord.ui.View):
     return None
 
 
-# --- 3. HYBRID COMMANDS COG ---
+# --- 3. HYBRID COMMANDS COG (ECO, GAMES, STEAL) ---
 USER_BALANCES = {}
 
 
@@ -379,7 +424,7 @@ class Minigames(commands.Cog):
   # 🏏 Hand Cricket (.cricket and /cricket)
   @commands.hybrid_command(
       name="cricket",
-      description="Start a multi-player Team Hand Cricket match!",
+      description="Start a multi-player Team Hand Cricket match with GIFs!",
   )
   @app_commands.describe(
       overs="Overs per match (default: 2)",
@@ -388,8 +433,51 @@ class Minigames(commands.Cog):
   async def cricket(
       self, ctx: commands.Context, overs: int = 2, players_per_team: int = 2
   ):
+    if ctx.channel.id in ACTIVE_LOBBIES:
+      return await ctx.send(
+          "A cricket match setup is already active in this channel!",
+          ephemeral=True,
+      )
     game = TeamCricketGame(ctx, overs=overs, players_per_team=players_per_team)
     await game.start_match()
+
+  # 🤖 Add Bot manually during setup (/addbot a or /addbot b)
+  @commands.hybrid_command(
+      name="addbot", description="Manually add a bot to Team A or Team B."
+  )
+  @app_commands.describe(team="Type 'a' for Team A or 'b' for Team B")
+  @app_commands.choices(
+      team=[
+          app_commands.Choice(name="Team A", value="a"),
+          app_commands.Choice(name="Team B", value="b"),
+      ]
+  )
+  async def addbot(self, ctx: commands.Context, team: str):
+    lobby = ACTIVE_LOBBIES.get(ctx.channel.id)
+    if not lobby:
+      return await ctx.send(
+          "No active cricket match lobby in this channel! Start one with"
+          " `/cricket`.",
+          ephemeral=True,
+      )
+
+    bot_name = lobby.add_bot(team)
+    if not bot_name:
+      return await ctx.send(
+          f"❌ Team {team.upper()} is already full!", ephemeral=True
+      )
+
+    await ctx.send(
+        f"🤖 Added **{bot_name}** to **Team {team.upper()}**! (Team A:"
+        f" {len(lobby.team_a)}/{lobby.players_per_team} | Team B:"
+        f" {len(lobby.team_b)}/{lobby.players_per_team})"
+    )
+
+    if (
+        len(lobby.team_a) >= lobby.players_per_team
+        and len(lobby.team_b) >= lobby.players_per_team
+    ):
+      lobby.match_started = True
 
   # ❌⭕ Tic-Tac-Toe (.ttt and /ttt)
   @commands.hybrid_command(
@@ -406,45 +494,109 @@ class Minigames(commands.Cog):
 
   # 💼 Work (.work and /work)
   @commands.hybrid_command(
-      name="work", description="Earn virtual cash by working!"
+      name="work", description="Work hard to earn virtual coins!"
   )
   async def work(self, ctx: commands.Context):
-    earned = random.randint(100, 500)
+    earned = random.randint(150, 600)
     USER_BALANCES[ctx.author.id] = USER_BALANCES.get(ctx.author.id, 0) + earned
-    await ctx.send(
-        f"💼 {ctx.author.mention}, you worked hard and earned **${earned}**!"
+    jobs = [
+        "coded a custom Discord bot",
+        "streamed anime on Discord",
+        "managed the server Discord support ticket system",
+        "mined diamonds in Minecraft",
+    ]
+    embed = discord.Embed(
+        title="💼 Work Shift Completed!",
+        description=(
+            f"{ctx.author.mention} went to work and **{random.choice(jobs)}**,"
+            f" earning **${earned:,} coins**!"
+        ),
+        color=discord.Color.gold(),
     )
+    await ctx.send(embed=embed)
 
-  # 💰 Balance (.bal and /bal)
+  # 💰 Balance (.bal and /bal) with Rich Embed
   @commands.hybrid_command(
-      name="bal", description="Check your virtual coin balance."
+      name="bal", description="Check your or another member's balance."
   )
   @app_commands.describe(member="Member whose balance you want to check")
   async def bal(
       self, ctx: commands.Context, member: discord.Member | None = None
   ):
     target = member or ctx.author
-    await ctx.send(
-        f"💰 **{target.display_name}'s Balance:**"
-        f" ${USER_BALANCES.get(target.id, 0):,}"
+    coins = USER_BALANCES.get(target.id, 0)
+    embed = discord.Embed(
+        title=f"💰 {target.display_name}'s Wallet",
+        description=f"**Current Balance:** `${coins:,} virtual coins`",
+        color=discord.Color.green(),
     )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    await ctx.send(embed=embed)
 
-  # 🧩 Word Guess (.wordguess and /wordguess)
+  # 🦹 Steal / Rob (.steal and /steal @user)
+  @commands.hybrid_command(
+      name="steal", description="Attempt to steal coins from another user!"
+  )
+  @app_commands.describe(member="The user you want to rob")
+  async def steal(self, ctx: commands.Context, member: discord.Member):
+    if member == ctx.author or member.bot:
+      return await ctx.send(
+          "You can't steal from yourself or bots!", ephemeral=True
+      )
+
+    author_bal = USER_BALANCES.get(ctx.author.id, 0)
+    target_bal = USER_BALANCES.get(member.id, 0)
+
+    if target_bal < 100:
+      return await ctx.send(
+          f"❌ {member.display_name} is too poor to rob! They have less than"
+          " $100.",
+          ephemeral=True,
+      )
+
+    success = random.choice([True, False, False])  # 33% success rate
+    if success:
+      stolen = random.randint(50, min(300, target_bal // 2))
+      USER_BALANCES[member.id] -= stolen
+      USER_BALANCES[ctx.author.id] = author_bal + stolen
+      await ctx.send(
+          f"🦹 **Success!** {ctx.author.mention} sneaked up on {member.mention}"
+          f" and stole **${stolen:,} coins**!"
+      )
+    else:
+      fine = random.randint(50, 200)
+      USER_BALANCES[ctx.author.id] = max(0, author_bal - fine)
+      USER_BALANCES[member.id] = target_bal + fine
+      await ctx.send(
+          f"🚨 **Busted!** {ctx.author.mention} got caught trying to rob"
+          f" {member.mention} and had to pay a fine of **${fine:,} coins**!"
+      )
+
+  # 🧩 Word Guess (.wordguess / .gw and /wordguess)
   @commands.hybrid_command(
       name="wordguess", description="Guess the scrambled word with a hint!"
   )
   async def wordguess(self, ctx: commands.Context):
     words = {
-        "python": "Programming language",
-        "minecraft": "Block sandbox game",
-        "discord": "Chat app",
-        "render": "Hosting platform",
+        "python": "A popular programming language named after a snake",
+        "minecraft": "A sandbox game built with blocks",
+        "discord": "The app you are using right now",
+        "render": "The platform where this bot is hosted 24/7",
+        "cricket": "A popular bat-and-ball team sport",
     }
     word, hint = random.choice(list(words.items()))
-    await ctx.send(
-        "🧩 **Guess the Word!** Scrambled:"
-        f" `{''.join(random.sample(word, len(word)))}` | Hint: {hint}"
+    scrambled = "".join(random.sample(word, len(word)))
+
+    embed = discord.Embed(
+        title="🧩 Guess the Word!",
+        description=(
+            f"**Scrambled:** `{scrambled}`\n**Hint:** {hint}\n*Type the correct"
+            " word in chat within 30 seconds!*"
+        ),
+        color=discord.Color.blurple(),
     )
+    await ctx.send(embed=embed)
+
     try:
       m = await self.bot.wait_for(
           "message",
@@ -452,9 +604,13 @@ class Minigames(commands.Cog):
           check=lambda msg: msg.channel == ctx.channel
           and msg.content.lower() == word,
       )
-      await ctx.send(f"🎉 Correct, {m.author.mention}! It was **{word}**!")
+      await ctx.send(
+          f"🎉 Correct, {m.author.mention}! The secret word was **{word}**!"
+      )
     except asyncio.TimeoutError:
-      await ctx.send(f"⏱️ Time's up! The word was **{word}**.")
+      await ctx.send(
+          f"⏱️ Time's up! Nobody guessed it. The word was **{word}**."
+      )
 
 
 async def setup(bot):
