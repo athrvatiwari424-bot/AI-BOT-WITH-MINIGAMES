@@ -25,6 +25,64 @@ def get_user(user_id: int):
     return USER_DATA[user_id]
 
 
+# --- CRICKET LOBBY UI ---
+class CricketLobbyView(discord.ui.View):
+    def __init__(self, match_session):
+        super().__init__(timeout=900)  # 15 minute timeout auto-disband
+        self.match_session = match_session
+
+    async def on_timeout(self):
+        if not self.match_session["started"]:
+            self.match_session["active"] = False
+            try:
+                await self.match_session["msg"].edit(content="⌛ **Cricket lobby expired and auto-disbanded after 15 minutes of inactivity.**", embed=None, view=None)
+            except Exception:
+                pass
+
+    @discord.ui.button(label="Join Team A", style=discord.ButtonStyle.primary, custom_id="join_team_a")
+    async def join_a(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user
+        if user in self.match_session["team_b"]:
+            self.match_session["team_b"].remove(user)
+        if user not in self.match_session["team_a"]:
+            self.match_session["team_a"].append(user)
+            await interaction.response.send_message(f"✅ {user.mention} joined **{self.match_session['team_a_name']}**!", ephemeral=True)
+            await self.match_session["update_embed"]()
+        else:
+            await interaction.response.send_message("You are already in this team!", ephemeral=True)
+
+    @discord.ui.button(label="Join Team B", style=discord.ButtonStyle.danger, custom_id="join_team_b")
+    async def join_b(self, interaction: discord.Interaction, button: discord.ui.Button):
+        user = interaction.user
+        if user in self.match_session["team_a"]:
+            self.match_session["team_a"].remove(user)
+        if user not in self.match_session["team_b"]:
+            self.match_session["team_b"].append(user)
+            await interaction.response.send_message(f"✅ {user.mention} joined **{self.match_session['team_b_name']}**!", ephemeral=True)
+            await self.match_session["update_embed"]()
+        else:
+            await interaction.response.send_message("You are already in this team!", ephemeral=True)
+
+    @discord.ui.button(label="Start Match 🚀", style=discord.ButtonStyle.success, custom_id="start_match")
+    async def start_match(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user != self.match_session["host"]:
+            return await interaction.response.send_message("❌ Only the host can start the match!", ephemeral=True)
+        if len(self.match_session["team_a"]) == 0 or len(self.match_session["team_b"]) == 0:
+            return await interaction.response.send_message("❌ Both teams must have at least 1 player/bot!", ephemeral=True)
+        if len(self.match_session["team_a"]) != len(self.match_session["team_b"]):
+            return await interaction.response.send_message("❌ Teams must have an equal number of players! Use `/addbot` to balance.", ephemeral=True)
+
+        self.match_session["started"] = True
+        for child in self.children:
+            child.disabled = True
+        try:
+            await interaction.message.edit(view=self)
+        except Exception:
+            pass
+        await interaction.response.send_message(f"🏏 **Match starting between {self.match_session['team_a_name']} and {self.match_session['team_b_name']}! Check DMs.**")
+        self.match_session["future"].set_result(True)
+
+
 # --- TIC-TAC-TOE UI ---
 class TicTacToeButton(discord.ui.Button):
     def __init__(self, x: int, y: int):
@@ -97,51 +155,8 @@ class TicTacToeView(discord.ui.View):
         return None
 
 
-# --- CRICKET LOBBY UI ---
-class CricketLobbyView(discord.ui.View):
-    def __init__(self, match_session):
-        super().__init__(timeout=None)
-        self.match_session = match_session
-
-    @discord.ui.button(label="Join Team A", style=discord.ButtonStyle.primary, custom_id="join_team_a")
-    async def join_a(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = interaction.user
-        if user in self.match_session["team_b"]:
-            self.match_session["team_b"].remove(user)
-        if user not in self.match_session["team_a"]:
-            self.match_session["team_a"].append(user)
-            await interaction.response.send_message(f"✅ {user.mention} joined **Team A**!", ephemeral=True)
-            await self.match_session["update_embed"]()
-        else:
-            await interaction.response.send_message("You are already in Team A!", ephemeral=True)
-
-    @discord.ui.button(label="Join Team B", style=discord.ButtonStyle.danger, custom_id="join_team_b")
-    async def join_b(self, interaction: discord.Interaction, button: discord.ui.Button):
-        user = interaction.user
-        if user in self.match_session["team_a"]:
-            self.match_session["team_a"].remove(user)
-        if user not in self.match_session["team_b"]:
-            self.match_session["team_b"].append(user)
-            await interaction.response.send_message(f"✅ {user.mention} joined **Team B**!", ephemeral=True)
-            await self.match_session["update_embed"]()
-        else:
-            await interaction.response.send_message("You are already in Team B!", ephemeral=True)
-
-    @discord.ui.button(label="Start Match 🚀", style=discord.ButtonStyle.success, custom_id="start_match")
-    async def start_match(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.match_session["host"]:
-            return await interaction.response.send_message("❌ Only the host can start the match!", ephemeral=True)
-        if len(self.match_session["team_a"]) == 0 or len(self.match_session["team_b"]) == 0:
-            return await interaction.response.send_message("❌ Both teams must have at least 1 player!", ephemeral=True)
-        if len(self.match_session["team_a"]) != len(self.match_session["team_b"]):
-            return await interaction.response.send_message("❌ Teams must have an equal number of players!", ephemeral=True)
-
-        self.match_session["started"] = True
-        for child in self.children:
-            child.disabled = True
-        await interaction.message.edit(view=self)
-        await interaction.response.send_message("🏏 **Match starting! Check your DMs for hand cricket deliveries...**")
-        self.match_session["future"].set_result(True)
+# --- ACTIVE LOBBY REGISTRY FOR MANAGEMENT COMMANDS ---
+ACTIVE_LOBBIES = {}
 
 
 # --- MAIN COG ---
@@ -149,39 +164,29 @@ class Minigames(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    # --- 1. GUESS THE WORD (WORDLE MINI) ---
+    # --- 1. WORD & PUZZLE GAMES ---
     @app_commands.command(name="guesstheword", description="Play a round of Guess the Word!")
     async def guesstheword(self, interaction: discord.Interaction):
         words_list = ["APPLE", "TRAIN", "BEACH", "CHESS", "PLANT", "TIGER", "SMILE", "WATER", "HOUSE", "MUSIC"]
         target = random.choice(words_list)
-        await interaction.response.send_message(f"🧩 **Guess the Word!** It's a 5-letter word. Type your guesses in chat! You have 5 attempts.")
+        await interaction.response.send_message(f"🧩 **Guess the Word!** 5-letter word. Type your guesses in chat! 5 attempts.")
 
         def check(m):
             return m.author == interaction.user and m.channel == interaction.channel and len(m.content.upper()) == 5
 
-        attempts = 5
-        for _ in range(attempts):
+        for _ in range(5):
             try:
                 msg = await self.bot.wait_for("message", timeout=30.0, check=check)
                 guess = msg.content.upper()
                 if guess == target:
-                    await msg.reply(f"🎉 Correct! The word was **{target}**!")
-                    return
+                    return await msg.reply(f"🎉 Correct! The word was **{target}**!")
                 
-                feedback = ""
-                for i in range(5):
-                    if guess[i] == target[i]:
-                        feedback += f"🟩 `{guess[i]}`"
-                    elif guess[i] in target:
-                        feedback += f"🟨 `{guess[i]}`"
-                    else:
-                        feedback += f"⬛ `{guess[i]}`"
+                feedback = "".join([f"🟩 `{guess[i]}`" if guess[i] == target[i] else f"🟨 `{guess[i]}`" if guess[i] in target else f"⬛ `{guess[i]}`" for i in range(5)])
                 await msg.reply(f"Feedback: {feedback}")
             except asyncio.TimeoutError:
                 return await interaction.followup.send(f"⏰ Time's up! The word was **{target}**.")
         await interaction.followup.send(f"❌ Out of attempts! The word was **{target}**.")
 
-    # --- 2. MAKE A WORD ---
     @app_commands.command(name="makeword", description="Unscramble the letters to make a valid word!")
     async def makeword(self, interaction: discord.Interaction):
         word_bank = ["PYTHON", "DISCORD", "CRICKET", "GAMING", "SERVER", "DEVELOP", "SYSTEM", "PLAYER"]
@@ -206,8 +211,7 @@ class Minigames(commands.Cog):
         except asyncio.TimeoutError:
             await interaction.followup.send(f"⏰ Time's up! The word was **{original}**.")
 
-    # --- 3. TIC-TAC-TOE ---
-    @app_commands.command(name="tictactoe", description="Play a game of Tic-Tac-Toe with another member!")
+    @app_commands.command(name="tictactoe", description="Play Tic-Tac-Toe against another member!")
     @app_commands.describe(opponent="The member you want to play against")
     async def tictactoe(self, interaction: discord.Interaction, opponent: discord.Member):
         if opponent.bot or opponent == interaction.user:
@@ -215,11 +219,11 @@ class Minigames(commands.Cog):
         
         view = TicTacToeView(interaction.user, opponent)
         await interaction.response.send_message(
-            f"🎮 **Tic-Tac-Toe Challenge!** {interaction.user.mention} (X) vs {opponent.mention} (O)\nTurn: **{interaction.user.mention}**",
+            f"🎮 **Tic-Tac-Toe!** {interaction.user.mention} (X) vs {opponent.mention} (O)\nTurn: **{interaction.user.mention}**",
             view=view
         )
 
-    # --- 4. OWOC-STYLE ECONOMY & SHOP ---
+    # --- 2. OWOC ECONOMY & SHOP ---
     @app_commands.command(name="work", description="Work to earn coins (or risk losing money on a bad day!).")
     @commands.cooldown(1, 30, commands.BucketType.user)
     async def work(self, interaction: discord.Interaction):
@@ -228,20 +232,20 @@ class Minigames(commands.Cog):
             loss = random.randint(30, 150)
             data["wallet"] = max(0, data["wallet"] - loss)
             fail_msg = random.choice([
-                f"💥 You tripped and broke a customer's vase! Paid **{loss} coins** in damages.",
-                f"💸 You got caught slacking off by the boss! Deducted **{loss} coins**.",
+                f"💥 You broke a customer's vase! Paid **{loss} coins** in damages.",
+                f"💸 Caught slacking off! Deducted **{loss} coins**.",
                 f"📉 Bad day at work! You lost **{loss} coins**.",
-                f"🚨 You spilled coffee on the server rig! Fined **{loss} coins**."
+                f"🚨 Spilled coffee on the server rig! Fined **{loss} coins**."
             ])
             await interaction.response.send_message(f"{fail_msg}\n💳 Wallet balance: **{data['wallet']} coins**")
         else:
             earnings = random.randint(50, 300)
             data["wallet"] += earnings
             win_msg = random.choice([
-                f"💼 You worked hard as a server mod and earned **{earnings} coins**!",
-                f"🏏 You coached a cricket squad and got paid **{earnings} coins**!",
-                f"🛠️ You fixed some bot bugs and received a tip of **{earnings} coins**!",
-                f"📦 You delivered packages all day and earned **{earnings} coins**!"
+                f"💼 Worked hard as a server mod and earned **{earnings} coins**!",
+                f"🏏 Coached a cricket squad and got paid **{earnings} coins**!",
+                f"🛠️ Fixed bot bugs and received a tip of **{earnings} coins**!",
+                f"📦 Delivered packages all day and earned **{earnings} coins**!"
             ])
             await interaction.response.send_message(f"✅ {win_msg}\n💳 Wallet balance: **{data['wallet']} coins**")
 
@@ -288,23 +292,20 @@ class Minigames(commands.Cog):
         embed = discord.Embed(title=f"📦 {interaction.user.display_name}'s Inventory", description=items_list, color=discord.Color.blue())
         await interaction.response.send_message(embed=embed)
 
-    # --- 5. FUN TESTS & CHAT MINIGAMES ---
+    # --- 3. FUN TESTS & MINIGAMES ---
     @app_commands.command(name="gaytest", description="Calculates the gay percentage!")
-    @app_commands.describe(member="The member to test")
     async def gaytest(self, interaction: discord.Interaction, member: discord.Member = None):
         target = member or interaction.user
         prob = random.randint(1, 100) if random.random() < 0.75 else random.randint(101, 250)
         await interaction.response.send_message(f"🏳️‍🌈 **{target.display_name}** is **{prob}%** gay! {GIF_VIRAT}")
 
     @app_commands.command(name="lesbiantest", description="Calculates the lesbian percentage!")
-    @app_commands.describe(member="The member to test")
     async def lesbiantest(self, interaction: discord.Interaction, member: discord.Member = None):
         target = member or interaction.user
         prob = random.randint(1, 100) if random.random() < 0.75 else random.randint(101, 250)
         await interaction.response.send_message(f"💜 **{target.display_name}** is **{prob}%** lesbian!")
 
     @app_commands.command(name="baldtest", description="Calculates how bald someone is!")
-    @app_commands.describe(member="The member to test")
     async def baldtest(self, interaction: discord.Interaction, member: discord.Member = None):
         target = member or interaction.user
         prob = random.randint(1, 100) if random.random() < 0.75 else random.randint(101, 250)
@@ -312,14 +313,11 @@ class Minigames(commands.Cog):
 
     @app_commands.command(name="coinflip", description="Flip a coin!")
     async def coinflip(self, interaction: discord.Interaction):
-        outcome = random.choice(["Heads 🪙", "Tails 🪙"])
-        await interaction.response.send_message(f"🪙 The coin landed on: **{outcome}**!")
+        await interaction.response.send_message(f"🪙 The coin landed on: **{random.choice(['Heads 🪙', 'Tails 🪙'])}**!")
 
     @app_commands.command(name="8ball", description="Ask the Magic 8-Ball a question!")
-    @app_commands.describe(question="Your question")
     async def eightball(self, interaction: discord.Interaction, question: str):
-        responses = ["It is certain.", "Without a doubt.", "Reply hazy, try again.", "Don't count on it.", "My sources say no.", "Outlook good!"]
-        reply = random.choice(responses)
+        reply = random.choice(["It is certain.", "Without a doubt.", "Reply hazy, try again.", "Don't count on it.", "My sources say no.", "Outlook good!"])
         await interaction.response.send_message(f"❓ **Question:** {question}\n🎱 **8-Ball:** {reply}")
 
     @app_commands.command(name="rps", description="Play Rock, Paper, Scissors with the bot!")
@@ -331,50 +329,49 @@ class Minigames(commands.Cog):
     async def rps(self, interaction: discord.Interaction, choice: app_commands.Choice[str]):
         bot_choice = random.choice(["rock", "paper", "scissors"])
         user_choice = choice.value
-        if user_choice == bot_choice:
-            res = "It's a tie! 🤝"
-        elif (user_choice == "rock" and bot_choice == "scissors") or \
-             (user_choice == "paper" and bot_choice == "rock") or \
-             (user_choice == "scissors" and bot_choice == "paper"):
-            res = "You win! 🎉"
-        else:
-            res = "I win! 😈"
+        res = "It's a tie! 🤝" if user_choice == bot_choice else "You win! 🎉" if (
+            (user_choice == "rock" and bot_choice == "scissors") or 
+            (user_choice == "paper" and bot_choice == "rock") or 
+            (user_choice == "scissors" and bot_choice == "paper")
+        ) else "I win! 😈"
         await interaction.response.send_message(f"You chose **{user_choice.title()}**, I chose **{bot_choice.title()}**. {res}")
 
-    # --- 6. HAND CRICKET ENGINE ---
-    @app_commands.command(name="cricket", description="Start a Hand Cricket match session!")
-    @app_commands.describe(
-        overs="Number of overs per innings",
-        tournament_mode="Enable tournament mode (2 batters on pitch)?"
-    )
+    # --- 4. STREAMLINED HAND CRICKET SUITE ---
+    @app_commands.command(name="cricket", description="Start a Hand Cricket match lobby!")
+    @app_commands.describe(overs="Number of overs", tournament_mode="Enable tournament mode (2 batters)?")
     @app_commands.choices(tournament_mode=[
         app_commands.Choice(name="Yes", value="yes"),
         app_commands.Choice(name="No", value="no")
     ])
     async def cricket(self, interaction: discord.Interaction, overs: int, tournament_mode: str):
-        host = interaction.user
-        is_tournament = (tournament_mode == "yes")
+        if interaction.channel.id in ACTIVE_LOBBIES:
+            return await interaction.response.send_message("❌ There is already an active cricket lobby in this channel!", ephemeral=True)
 
+        host = interaction.user
         match_session = {
             "host": host,
             "overs": overs,
-            "tournament_mode": is_tournament,
+            "tournament_mode": (tournament_mode == "yes"),
+            "team_a_name": "Team A",
+            "team_b_name": "Team B",
             "team_a": [host],
             "team_b": [],
             "started": False,
+            "active": True,
             "future": asyncio.get_running_loop().create_future()
         }
+        ACTIVE_LOBBIES[interaction.channel.id] = match_session
 
         embed = discord.Embed(title="🏏 Cricket Match LOBBY", color=discord.Color.gold())
         embed.add_field(name="Host", value=host.mention, inline=False)
         embed.add_field(name="Overs", value=str(overs), inline=True)
-        embed.add_field(name="Tournament Mode", value="Yes (2 Batters)" if is_tournament else "No", inline=True)
-        embed.add_field(name="Team A", value="\n".join([m.display_name for m in match_session["team_a"]]) or "Empty", inline=True)
+        embed.add_field(name="Tournament Mode", value="Yes (2 Batters)" if match_session["tournament_mode"] else "No", inline=True)
+        embed.add_field(name="Team A", value=host.display_name, inline=True)
         embed.add_field(name="Team B", value="Empty", inline=True)
 
         async def update_embed():
-            embed.set_field_at(3, name="Team A", value="\n".join([m.display_name for m in match_session["team_a"]]) or "Empty", inline=True)
-            embed.set_field_at(4, name="Team B", value="\n".join([m.display_name for m in match_session["team_b"]]) or "Empty", inline=True)
+            embed.set_field_at(3, name=match_session["team_a_name"], value="\n".join([m.display_name for m in match_session["team_a"]]) or "Empty", inline=True)
+            embed.set_field_at(4, name=match_session["team_b_name"], value="\n".join([m.display_name for m in match_session["team_b"]]) or "Empty", inline=True)
             try:
                 await msg.edit(embed=embed)
             except Exception:
@@ -385,16 +382,91 @@ class Minigames(commands.Cog):
 
         await interaction.response.send_message(embed=embed, view=view)
         msg = await interaction.original_response()
+        match_session["msg"] = msg
 
         try:
-            await asyncio.wait_for(match_session["future"], timeout=300)
+            await asyncio.wait_for(match_session["future"], timeout=900)
         except asyncio.TimeoutError:
-            return await interaction.followup.send("❌ Match lobby timed out.", ephemeral=True)
+            pass
+        finally:
+            if interaction.channel.id in ACTIVE_LOBBIES:
+                del ACTIVE_LOBBIES[interaction.channel.id]
 
-        await interaction.followup.send(
-            f"🚀 Match started! **Team A** ({len(match_session['team_a'])} players) vs **Team B** ({len(match_session['team_b'])} players).\n"
-            f"DM inputs activated with 2-second cooldown per delivery! {GIF_VIRAT}"
-        )
+    @app_commands.command(name="addbot", description="Add a bot player to a team in the lobby.")
+    @app_commands.choices(team=[app_commands.Choice(name="Team A", value="a"), app_commands.Choice(name="Team B", value="b")])
+    async def addbot(self, interaction: discord.Interaction, team: str):
+        lobby = ACTIVE_LOBBIES.get(interaction.channel.id)
+        if not lobby or lobby["started"]:
+            return await interaction.response.send_message("❌ No active lobby in this channel!", ephemeral=True)
+        if interaction.user != lobby["host"]:
+            return await interaction.response.send_message("❌ Only the host can add bots!", ephemeral=True)
+        
+        bot_name = f"Bot_{random.randint(100, 999)}"
+        # Mocking a bot member container
+        class DummyBot:
+            def __init__(self, name):
+                self.display_name = name
+                self.name = name
+                self.bot = True
+            def __str__(self):
+                return self.name
+
+        dummy = DummyBot(bot_name)
+        if team == "a":
+            lobby["team_a"].append(dummy)
+        else:
+            lobby["team_b"].append(dummy)
+
+        await interaction.response.send_message(f"🤖 Added **{bot_name}** to the lobby!", ephemeral=True)
+        await lobby["update_embed"]()
+
+    @app_commands.command(name="changeteamname", description="Change the name of a team in the lobby.")
+    @app_commands.choices(team=[app_commands.Choice(name="Team A", value="a"), app_commands.Choice(name="Team B", value="b")])
+    async def changeteamname(self, interaction: discord.Interaction, team: str, new_name: str):
+        lobby = ACTIVE_LOBBIES.get(interaction.channel.id)
+        if not lobby or lobby["started"]:
+            return await interaction.response.send_message("❌ No active lobby in this channel!", ephemeral=True)
+        if interaction.user != lobby["host"]:
+            return await interaction.response.send_message("❌ Only the host can rename teams!", ephemeral=True)
+
+        if team == "a":
+            lobby["team_a_name"] = new_name
+        else:
+            lobby["team_b_name"] = new_name
+
+        await interaction.response.send_message(f"✅ Team renamed to **{new_name}**!", ephemeral=True)
+        await lobby["update_embed"]()
+
+    @app_commands.command(name="shuffle", description="Randomly shuffle players between teams.")
+    async def shuffle(self, interaction: discord.Interaction):
+        lobby = ACTIVE_LOBBIES.get(interaction.channel.id)
+        if not lobby or lobby["started"]:
+            return await interaction.response.send_message("❌ No active lobby in this channel!", ephemeral=True)
+        if interaction.user != lobby["host"]:
+            return await interaction.response.send_message("❌ Only the host can shuffle teams!", ephemeral=True)
+
+        all_players = lobby["team_a"] + lobby["team_b"]
+        random.shuffle(all_players)
+        mid = len(all_players) // 2
+        lobby["team_a"] = all_players[:mid] or [all_players[0]]
+        lobby["team_b"] = all_players[mid:] if mid > 0 else all_players[1:]
+
+        await interaction.response.send_message("🔀 Teams have been randomly shuffled!", ephemeral=True)
+        await lobby["update_embed"]()
+
+    @app_commands.command(name="stop", description="Stop and disband an active cricket match lobby.")
+    async def stop(self, interaction: discord.Interaction):
+        lobby = ACTIVE_LOBBIES.get(interaction.channel.id)
+        if not lobby:
+            return await interaction.response.send_message("❌ No active lobby to stop in this channel!", ephemeral=True)
+        if interaction.user != lobby["host"] and not interaction.user.guild_permissions.manage_channels:
+            return await interaction.response.send_message("❌ Only the host or staff can stop the lobby!", ephemeral=True)
+
+        lobby["active"] = False
+        if not lobby["started"]:
+            lobby["future"].set_result(False)
+        del ACTIVE_LOBBIES[interaction.channel.id]
+        await interaction.response.send_message("🛑 Cricket match lobby has been successfully stopped and disbanded.")
 
 
 async def setup(bot):
