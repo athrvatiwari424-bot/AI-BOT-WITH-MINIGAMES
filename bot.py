@@ -27,10 +27,10 @@ async def on_ready():
         logger.error(f"Failed to sync slash commands: {e}")
 
 async def load_extensions():
+    # Removed 'game' since it lacked a setup function; kept active cogs
     initial_extensions = [
         'minigames',
         'moderation',
-        'game',
         'cricket',
         'music'
     ]
@@ -42,7 +42,7 @@ async def load_extensions():
         except Exception as e:
             logger.error(f"Failed to load extension {extension}: {e}")
 
-# Simple web server handler to satisfy Render's port binding requirement if deployed as a Web Service
+# Simple web server handler to satisfy Render's port binding requirement
 async def handle_ping(request):
     return web.Response(text="Bot is active and running!")
 
@@ -52,17 +52,21 @@ async def start_web_server():
     runner = web.AppRunner(app)
     await runner.setup()
     
-    # Render assigns a dynamic port via environment variable PORT (defaults to 10000)
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    logger.info(f"Web server started on port {port}")
+    
+    try:
+        await site.start()
+        logger.info(f"Health check web server running on port {port}")
+    except OSError as e:
+        if e.errno == 98:
+            logger.warning(f"Port {port} is already in use, skipping web server bind.")
+        else:
+            raise
 
 async def main():
     async with bot:
         await load_extensions()
-        
-        # Start the health check web server for Render in the background
         await start_web_server()
         
         token = os.getenv("DISCORD_TOKEN")
@@ -73,4 +77,7 @@ async def main():
         await bot.start(token)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("Bot stopped manually.")
