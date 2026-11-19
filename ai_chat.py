@@ -55,6 +55,38 @@ class AIChatCog(commands.Cog):
                 for guild_id, channel_id in await cursor.fetchall():
                     self.ai_channels[guild_id] = channel_id
 
+    def build_server_context(self, guild: discord.Guild, current_channel: discord.abc.GuildChannel) -> str:
+        # 1. Member info
+        total_members = guild.member_count or len(guild.members)
+        human_names = [
+            m.display_name for m in guild.members if not m.bot
+        ][:25]
+        members_preview = ", ".join(human_names) if human_names else "unavailable"
+
+        # 2. Channels info (cap to keep prompt short and fast)
+        text_ch = [f"#{c.name}" for c in guild.text_channels if not c.is_nsfw()][:20]
+        voice_ch = [c.name for c in guild.voice_channels][:10]
+
+        # 3. Bot commands info
+        slash_cmds = [
+            f"/{cmd.name}: {cmd.description}"
+            for cmd in self.bot.tree.get_commands()
+        ]
+        prefix_cmds = [
+            f"!{cmd.name}" + (f" - {cmd.help}" if cmd.help else "")
+            for cmd in self.bot.commands
+            if not cmd.hidden
+        ]
+        all_cmds = slash_cmds + prefix_cmds
+        cmds_summary = " | ".join(all_cmds[:25]) if all_cmds else "standard bot commands"
+
+        return (
+            f"Server Name: {guild.name} | Current Channel: #{getattr(current_channel, 'name', 'unknown')}\n"
+            f"Total Members: {total_members} | Sample Members: {members_preview}\n"
+            f"Text Channels: {', '.join(text_ch) if text_ch else 'none'} | Voice Channels: {', '.join(voice_ch) if voice_ch else 'none'}\n"
+            f"My Commands: {cmds_summary}"
+        )
+
     @app_commands.command(
         name="setaichat",
         description="Set a specific channel for fun AI chat, quick Q&A, and simple math.",
@@ -133,7 +165,7 @@ class AIChatCog(commands.Cog):
                         contents=prompt,
                         config=config,
                     ),
-                    timeout=8.0,
+                    timeout=8.5,
                 )
                 text = (response.text or "").strip()
                 if text:
@@ -167,9 +199,15 @@ class AIChatCog(commands.Cog):
             history = history[-5:]
             self.channel_history[message.channel.id] = history
 
+            server_info = self.build_server_context(message.guild, message.channel)
+
             prompt = (
                 "You are liebe, a fun, chill Discord bot for casual chat, quick questions, "
-                "and simple math. Keep replies short (1–3 sentences).\n\n"
+                "simple math, and helping users with server info or how to use your commands. "
+                "Use the Server Context below when asked about members, channels, or commands. "
+                "Keep replies short (1–3 sentences).\n\n"
+                f"Server Context:\n{server_info}\n\n"
+                "Recent Chat:\n"
                 + "\n".join(history)
                 + "\nliebe:"
             )
@@ -180,10 +218,11 @@ class AIChatCog(commands.Cog):
                     history.append(f"liebe: {reply_text}")
                     self.channel_history[message.channel.id] = history[-5:]
                     await message.channel.send(reply_text[:1900])
-                except asyncio.TimeoutError:
-                    await message.channel.send("Quick brain freeze—try sending that again!")
                 except Exception as e:
-                    await message.channel.send(f"Couldn't reply: `{str(e)[:300]}`")
+                    logger.error(f"AI chat fallback triggered: {e}")
+                    await message.channel.send(
+                        "Sorry, can you gimme a minute? Something went wrong — lemme kill this bug."
+                    )
 
 
 async def setup(bot: commands.Bot):
