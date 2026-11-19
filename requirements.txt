@@ -3,3 +3,4 @@ aiosqlite==0.22.1
 yt-dlp
 PyNaCl
 aiohttp
+google-genai
