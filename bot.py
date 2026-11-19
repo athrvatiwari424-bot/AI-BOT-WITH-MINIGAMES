@@ -16,6 +16,7 @@ intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+
 @bot.event
 async def on_ready():
     await init_db()
@@ -26,15 +27,16 @@ async def on_ready():
     except Exception as e:
         logger.error(f"Failed to sync slash commands: {e}")
 
+
 async def load_extensions():
-    # Removed 'game' since it lacked a setup function; kept active cogs
     initial_extensions = [
-        'minigames',
-        'moderation',
-        'cricket',
-        'music'
+        "minigames",
+        "moderation",
+        "cricket",
+        "music",
+        "ai_chat",
     ]
-    
+
     for extension in initial_extensions:
         try:
             await bot.load_extension(extension)
@@ -42,19 +44,20 @@ async def load_extensions():
         except Exception as e:
             logger.error(f"Failed to load extension {extension}: {e}")
 
-# Simple web server handler to satisfy Render's port binding requirement
+
 async def handle_ping(request):
     return web.Response(text="Bot is active and running!")
+
 
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
     await runner.setup()
-    
+
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
-    
+
     try:
         await site.start()
         logger.info(f"Health check web server running on port {port}")
@@ -64,17 +67,19 @@ async def start_web_server():
         else:
             raise
 
+
 async def main():
     async with bot:
         await load_extensions()
         await start_web_server()
-        
+
         token = os.getenv("DISCORD_TOKEN")
         if not token:
             logger.error("DISCORD_TOKEN environment variable is missing!")
             return
-            
+
         await bot.start(token)
+
 
 if __name__ == "__main__":
     try:
