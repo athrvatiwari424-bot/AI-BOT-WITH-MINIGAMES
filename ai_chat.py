@@ -20,16 +20,17 @@ class AIChatCog(commands.Cog):
         self.channel_locks: dict[int, asyncio.Lock] = {}
 
         api_key = os.getenv("GEMINI_API_KEY")
+        # Minimum allowed server deadline is 10s (10000ms)
         self.client = (
             genai.Client(
                 api_key=api_key,
-                http_options=types.HttpOptions(timeout=8000),
+                http_options=types.HttpOptions(timeout=10000),
             )
             if api_key
             else None
         )
 
-        # Free-tier Gemini models ordered for low latency
+        # Fast free-tier models ordered for low latency
         self.models = [
             "gemini-3.5-flash-lite",
             "gemini-3.1-flash-lite",
