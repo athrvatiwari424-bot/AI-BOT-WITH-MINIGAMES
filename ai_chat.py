@@ -23,17 +23,18 @@ class AIChatCog(commands.Cog):
         self.client = (
             genai.Client(
                 api_key=api_key,
-                http_options=types.HttpOptions(timeout=8000),  # 8s hard HTTP cap
+                http_options=types.HttpOptions(timeout=8000),
             )
             if api_key
             else None
         )
 
-        # Fastest low-latency Gemini models first
+        # Free-tier Gemini models ordered for low latency
         self.models = [
             "gemini-3.5-flash-lite",
             "gemini-3.1-flash-lite",
             "gemini-3.8-flash",
+            "gemini-3.6-flash",
         ]
 
     async def cog_load(self):
@@ -50,13 +51,12 @@ class AIChatCog(commands.Cog):
             async with db.execute(
                 "SELECT guild_id, channel_id FROM ai_chat_channels"
             ) as cursor:
-                rows = await cursor.fetchall()
-                for guild_id, channel_id in rows:
+                for guild_id, channel_id in await cursor.fetchall():
                     self.ai_channels[guild_id] = channel_id
 
     @app_commands.command(
         name="setaichat",
-        description="Set a specific channel where Gemini will chat.",
+        description="Set a specific channel for fun AI chat, quick Q&A, and simple math.",
     )
     @app_commands.describe(channel="The text channel for AI chat")
     @app_commands.default_permissions(administrator=True)
@@ -94,7 +94,7 @@ class AIChatCog(commands.Cog):
 
     @app_commands.command(
         name="clearaichat",
-        description="Disable Gemini AI chat in this server.",
+        description="Disable AI chat in this server.",
     )
     @app_commands.default_permissions(administrator=True)
     async def clear_ai_chat(self, interaction: discord.Interaction):
@@ -112,21 +112,19 @@ class AIChatCog(commands.Cog):
                     (interaction.guild.id,),
                 )
                 await db.commit()
-            await interaction.response.send_message("Gemini AI chat disabled.")
+            await interaction.response.send_message("AI chat has been disabled.")
         else:
             await interaction.response.send_message(
                 "No AI chat channel was set for this server.", ephemeral=True
             )
 
     async def generate_reply(self, prompt: str) -> str:
-        last_error = None
+        errors = []
         for model_name in self.models:
             try:
-                # Disable internal thinking delay on Flash models for instant chat replies
                 config = types.GenerateContentConfig(
-                    max_output_tokens=250,
+                    max_output_tokens=220,
                     temperature=0.8,
-                    thinking_config=types.ThinkingConfig(thinking_budget=0),
                 )
                 response = await asyncio.wait_for(
                     self.client.aio.models.generate_content(
@@ -139,12 +137,14 @@ class AIChatCog(commands.Cog):
                 text = (response.text or "").strip()
                 if text:
                     return text
+                errors.append(f"{model_name}: empty response")
             except Exception as e:
-                last_error = e
-                logger.warning(f"Model {model_name} failed/slow: {type(e).__name__}")
+                detail = f"{model_name} -> {type(e).__name__}: {e}"
+                logger.error(detail)
+                errors.append(detail)
                 continue
 
-        raise last_error or RuntimeError("All Gemini models timed out.")
+        raise RuntimeError(" | ".join(errors) if errors else "No Gemini response")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -162,13 +162,13 @@ class AIChatCog(commands.Cog):
 
         async with lock:
             history = self.channel_history.setdefault(message.channel.id, [])
-            history.append(f"{message.author.display_name}: {message.content}")
-            history = history[-6:]  # Keep last 6 messages for fast token processing
+            history.append(f"{message.author.display_name}: {message.content.strip()}")
+            history = history[-5:]
             self.channel_history[message.channel.id] = history
 
             prompt = (
-                "You are liebe, a witty, fast-talking Discord bot. "
-                "Reply in 1–3 short, punchy sentences.\n\n"
+                "You are liebe, a fun, chill Discord bot for casual chat, quick questions, "
+                "and simple math. Keep replies short (1–3 sentences).\n\n"
                 + "\n".join(history)
                 + "\nliebe:"
             )
@@ -177,15 +177,12 @@ class AIChatCog(commands.Cog):
                 try:
                     reply_text = await self.generate_reply(prompt)
                     history.append(f"liebe: {reply_text}")
-                    self.channel_history[message.channel.id] = history[-6:]
-
+                    self.channel_history[message.channel.id] = history[-5:]
                     await message.channel.send(reply_text[:1900])
                 except asyncio.TimeoutError:
-                    await message.channel.send("Brain lag—send that again!")
+                    await message.channel.send("Quick brain freeze—try sending that again!")
                 except Exception as e:
-                    await message.channel.send(
-                        f"Couldn't reply right now (`{type(e).__name__}`)."
-                    )
+                    await message.channel.send(f"Couldn't reply: `{str(e)[:300]}`")
 
 
 async def setup(bot: commands.Bot):
