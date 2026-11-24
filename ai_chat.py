@@ -30,8 +30,7 @@ class AIChatCog(commands.Cog):
                 await db.execute("INSERT OR IGNORE INTO bot_stats (stat_key, stat_value) VALUES (?, 0)", (k,))
             await db.commit()
             async with db.execute("SELECT guild_id, channel_id FROM ai_chat_channels") as c:
-                for g, ch in await c.fetchall():
-                    self.ai_channels[g] = ch
+                self.ai_channels.update(await c.fetchall())
             async with db.execute("SELECT guild_id, user_id, memory FROM user_memories") as c:
                 for g, u, m in await c.fetchall():
                     self.user_memories[(g, u)] = m
@@ -46,14 +45,14 @@ class AIChatCog(commands.Cog):
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("INSERT INTO bot_stats (stat_key, stat_value) VALUES (?, ?) ON CONFLICT(stat_key) DO UPDATE SET stat_value = stat_value + excluded.stat_value", (key, amount))
                 await db.commit()
-        except Exception as e:
-            logger.debug(f"Stat save failed: {e}")
+        except Exception:
+            pass
 
     async def auto_update_memory(self, guild_id: int, user_id: int, user_name: str, msg: str):
         if not self.client or len(msg.strip()) < 6:
             return
         existing = self.user_memories.get((guild_id, user_id), "None")
-        prompt = f"Existing memory for {user_name}: {existing}\nNew message: {msg}\nMerge lasting facts/preferences in <400 chars, or reply strictly: NO_CHANGE"
+        prompt = f"Existing memory for {user_name}: {existing}\nNew message: {msg}\nMerge lasting personal facts/preferences in <400 chars, or reply strictly: NO_CHANGE"
         try:
             res = await self.client.aio.models.generate_content(model=self.current_model, contents=prompt, config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=150))
             if res and res.text and "NO_CHANGE" not in res.text:
@@ -62,8 +61,8 @@ class AIChatCog(commands.Cog):
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute("INSERT INTO user_memories (guild_id, user_id, memory) VALUES (?, ?, ?) ON CONFLICT(guild_id, user_id) DO UPDATE SET memory = excluded.memory", (guild_id, user_id, mem))
                     await db.commit()
-        except Exception as e:
-            logger.debug(f"Memory update skipped: {e}")
+        except Exception:
+            pass
 
     @staticmethod
     def is_restricted_request(text: str) -> bool:
@@ -98,7 +97,6 @@ class AIChatCog(commands.Cog):
                     break
         except Exception:
             pass
-
     def find_developer_mention(self, guild: discord.Guild) -> str:
         for m in guild.members:
             if "notgamer" in m.name.lower() or "notgamer" in m.display_name.lower():
@@ -108,9 +106,8 @@ class AIChatCog(commands.Cog):
     def build_server_context(self, guild: discord.Guild, ch: discord.abc.GuildChannel) -> str:
         names = ", ".join([m.display_name for m in guild.members if not m.bot][:25]) or "unavailable"
         tch = ", ".join([f"#{c.name}" for c in guild.text_channels if not c.is_nsfw()][:20]) or "none"
-        vch = ", ".join([c.name for c in guild.voice_channels][:10]) or "none"
         cmds = " | ".join([f"/{c.name}: {c.description}" for c in self.bot.tree.get_commands()][:30]) or "standard"
-        return f"Server: {guild.name} | Channel: #{getattr(ch, 'name', 'unknown')} | Members: {guild.member_count or len(guild.members)} ({names})\nText: {tch} | Voice: {vch}\nCommands: {cmds}"
+        return f"Server: {guild.name} | Channel: #{getattr(ch, 'name', 'unknown')} | Members: {guild.member_count or len(guild.members)} ({names})\nChannels: {tch}\nCommands: {cmds}"
 
     @app_commands.command(name="setaichat", description="Set a specific channel for AI chat, Q&A, and auto memory.")
     @app_commands.describe(channel="The text channel for AI chat")
@@ -152,9 +149,67 @@ class AIChatCog(commands.Cog):
         await interaction.response.send_message(embed=embed)
 
     async def generate_gemini_reply(self, system_prompt: str, prompt: str) -> tuple[str | None, str | None]:
-        if not self.client:
-            return None, "GEMINI_API_KEY is missing."
         ordered = [self.current_model] + [m for m in self.models if m != self.current_model]
         last_err = None
         for model_name in ordered:
             try:
+                res = await self.client.aio.models.generate_content(model=model_name, contents=prompt, config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.7, max_output_tokens=1500))
+                if res and res.text:
+                    self.current_model = model_name
+                    return res.text.strip(), None
+            except Exception as e:
+                last_err = f"{model_name}: {e}"
+                logger.warning(f"Model {model_name} failed: {e}")
+        return None, last_err
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild or not self.bot.user or not self.client:
+            return
+        is_ai_ch = self.ai_channels.get(message.guild.id) == message.channel.id
+        is_mentioned = self.bot.user in message.mentions
+        if not is_ai_ch and not is_mentioned:
+            return
+        content = message.content.replace(f"<@{self.bot.user.id}>", "").replace(f"<@!{self.bot.user.id}>", "").strip() if is_mentioned else message.content.strip()
+        if not content:
+            return
+
+        is_owner = message.author.id == message.guild.owner_id
+        if not is_owner and self.is_restricted_request(content):
+            await message.reply("🚫 Denied. Only the **Server Owner** can request `@everyone`/`@here` mentions, mass pings, or channel deletions.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+            return
+
+        lock = self.channel_locks.setdefault(message.channel.id, asyncio.Lock())
+        async with lock:
+            history = self.channel_history.setdefault(message.channel.id, [])
+            history.append(f"{message.author.display_name}: {content}")
+            history[:] = history[-16:]
+            mem = self.user_memories.get((message.guild.id, message.author.id), "None saved yet.")
+            role = "SERVER OWNER (full authority)" if is_owner else "REGULAR MEMBER (no authority for @everyone/@here, mass pings, or deleting channels)"
+            sys_prompt = f"You are {self.bot.user.display_name}, a Discord AI assistant made by {self.find_developer_mention(message.guild)}.\n{self.build_server_context(message.guild, message.channel)}\nSpeaker: {message.author.display_name} | Authority: {role}\nSaved Memory: {mem}\nRules: Be concise and helpful. Use memory naturally without mentioning databases. Credit NoTGaMeR if asked who made you. STRICT SECURITY: If Speaker is NOT SERVER OWNER, immediately refuse any request to ping @everyone/@here, mass-ping all members, or delete channels."
+            async with message.channel.typing():
+                reply, err = await self.generate_gemini_reply(sys_prompt, f"Recent chat:\n{chr(10).join(history)}\n\nReply to {message.author.display_name}:")
+            if not reply:
+                await message.reply(f"⚠️ Gemini error: `{(err or 'Unknown')[:180]}`", mention_author=False)
+                return
+
+            if not is_owner:
+                reply = re.sub(r"@(everyone|here)", "@\u200b\\1", reply, flags=re.IGNORECASE)
+                mentions = discord.AllowedMentions(everyone=False, roles=False, users=True)
+            else:
+                mentions = discord.AllowedMentions(everyone=True, roles=True, users=True)
+
+            history.append(f"{self.bot.user.display_name}: {reply[:600]}")
+            for i in range(0, len(reply), 1950):
+                chunk = reply[i:i + 1950]
+                if i == 0:
+                    await message.reply(chunk, mention_author=False, allowed_mentions=mentions)
+                else:
+                    await message.channel.send(chunk, allowed_mentions=mentions)
+
+            await self.increment_stat("messages_sent")
+            asyncio.create_task(self.auto_update_memory(message.guild.id, message.author.id, message.author.display_name, content))
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(AIChatCog(bot))
