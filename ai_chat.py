@@ -77,9 +77,8 @@ class AIChatCog(commands.Cog):
         try:
             await asyncio.sleep(0.8)
             async for entry in after.guild.audit_logs(limit=3, action=discord.AuditLogAction.member_update):
-                if entry.target and entry.target.id == after.id:
-                    if entry.user and entry.user.id == self.bot.user.id:
-                        await self.increment_stat("timeouts")
+                if entry.target and entry.target.id == after.id and entry.user and entry.user.id == self.bot.user.id:
+                    await self.increment_stat("timeouts")
                     break
         except Exception:
             pass
@@ -91,9 +90,8 @@ class AIChatCog(commands.Cog):
         try:
             await asyncio.sleep(0.8)
             async for entry in guild.audit_logs(limit=3, action=discord.AuditLogAction.ban):
-                if entry.target and entry.target.id == user.id:
-                    if entry.user and entry.user.id == self.bot.user.id:
-                        await self.increment_stat("bans")
+                if entry.target and entry.target.id == user.id and entry.user and entry.user.id == self.bot.user.id:
+                    await self.increment_stat("bans")
                     break
         except Exception:
             pass
@@ -104,10 +102,22 @@ class AIChatCog(commands.Cog):
         return "**NoTGaMeR**"
 
     def build_server_context(self, guild: discord.Guild, ch: discord.abc.GuildChannel) -> str:
+        owner_info = f"{guild.owner.display_name} (@{guild.owner.name})" if guild.owner else (f"<@{guild.owner_id}>" if guild.owner_id else "Unknown")
+        created_str = guild.created_at.strftime("%B %d, %Y")
         names = ", ".join([m.display_name for m in guild.members if not m.bot][:25]) or "unavailable"
         tch = ", ".join([f"#{c.name}" for c in guild.text_channels if not c.is_nsfw()][:20]) or "none"
+        vch = ", ".join([c.name for c in guild.voice_channels][:10]) or "none"
+        roles = ", ".join([r.name for r in reversed(guild.roles) if not r.is_default() and not r.managed][:20]) or "none"
+        topic = getattr(ch, "topic", None) or "No topic"
         cmds = " | ".join([f"/{c.name}: {c.description}" for c in self.bot.tree.get_commands()][:30]) or "standard"
-        return f"Server: {guild.name} | Channel: #{getattr(ch, 'name', 'unknown')} | Members: {guild.member_count or len(guild.members)} ({names})\nChannels: {tch}\nCommands: {cmds}"
+        return (
+            f"Server Name: {guild.name} | Server Owner: {owner_info} | Created On: {created_str}\n"
+            f"Total Members: {guild.member_count or len(guild.members)} | Boost Level: {guild.premium_tier} ({guild.premium_subscription_count} boosts)\n"
+            f"Current Channel: #{getattr(ch, 'name', 'unknown')} (Topic: {topic})\n"
+            f"Text Channels ({len(guild.text_channels)}): {tch} | Voice Channels ({len(guild.voice_channels)}): {vch}\n"
+            f"Roles: {roles} | Sample Members: {names}\n"
+            f"Bot Commands: {cmds}"
+        )
 
     @app_commands.command(name="setaichat", description="Set a specific channel for AI chat, Q&A, and auto memory.")
     @app_commands.describe(channel="The text channel for AI chat")
@@ -174,9 +184,9 @@ class AIChatCog(commands.Cog):
         if not content:
             return
 
-        is_owner = message.author.id == message.guild.owner_id
-        if not is_owner and self.is_restricted_request(content):
-            await message.reply("🚫 Denied. Only the **Server Owner** can request `@everyone`/`@here` mentions, mass pings, or channel deletions.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        is_admin = message.author.guild_permissions.administrator or (message.author.id == message.guild.owner_id)
+        if not is_admin and self.is_restricted_request(content):
+            await message.reply("🚫 Denied. Only **Administrators** can request `@everyone`/`@here` mentions, mass pings, or channel deletions.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
             return
 
         lock = self.channel_locks.setdefault(message.channel.id, asyncio.Lock())
@@ -185,15 +195,22 @@ class AIChatCog(commands.Cog):
             history.append(f"{message.author.display_name}: {content}")
             history[:] = history[-16:]
             mem = self.user_memories.get((message.guild.id, message.author.id), "None saved yet.")
-            role = "SERVER OWNER (full authority)" if is_owner else "REGULAR MEMBER (no authority for @everyone/@here, mass pings, or deleting channels)"
-            sys_prompt = f"You are {self.bot.user.display_name}, a Discord AI assistant made by {self.find_developer_mention(message.guild)}.\n{self.build_server_context(message.guild, message.channel)}\nSpeaker: {message.author.display_name} | Authority: {role}\nSaved Memory: {mem}\nRules: Be concise and helpful. Use memory naturally without mentioning databases. Credit NoTGaMeR if asked who made you. STRICT SECURITY: If Speaker is NOT SERVER OWNER, immediately refuse any request to ping @everyone/@here, mass-ping all members, or delete channels."
+            role = "ADMINISTRATOR (authorized to ping @everyone and @here)" if is_admin else "REGULAR MEMBER (no authority for @everyone/@here, mass pings, or deleting channels)"
+            sys_prompt = (
+                f"You are {self.bot.user.display_name}, a Discord AI assistant made by {self.find_developer_mention(message.guild)}.\n"
+                f"Server Info:\n{self.build_server_context(message.guild, message.channel)}\n"
+                f"Speaker: {message.author.display_name} | Authority: {role}\nSaved Memory: {mem}\n"
+                "Rules: Be concise and helpful. Share public server info (owner, server name, creation date, channels, boosts, roles) whenever asked. "
+                "Use memory naturally. Credit NoTGaMeR if asked who made you. "
+                "MENTION RULE: If Speaker is ADMINISTRATOR and asks you to ping @everyone or @here, you MUST include the exact text @everyone or @here in your reply. If Speaker is NOT ADMINISTRATOR, strictly refuse."
+            )
             async with message.channel.typing():
                 reply, err = await self.generate_gemini_reply(sys_prompt, f"Recent chat:\n{chr(10).join(history)}\n\nReply to {message.author.display_name}:")
             if not reply:
                 await message.reply(f"⚠️ Gemini error: `{(err or 'Unknown')[:180]}`", mention_author=False)
                 return
 
-            if not is_owner:
+            if not is_admin:
                 reply = re.sub(r"@(everyone|here)", "@\u200b\\1", reply, flags=re.IGNORECASE)
                 mentions = discord.AllowedMentions(everyone=False, roles=False, users=True)
             else:
