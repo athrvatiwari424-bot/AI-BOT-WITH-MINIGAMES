@@ -1,426 +1,217 @@
-import random
-import string
-from datetime import timedelta
+import asyncio
+import os
+import re
+import logging
+import aiosqlite
 import discord
 from discord import app_commands
 from discord.ext import commands
+from google import genai
+from google.genai import types
+
+logger = logging.getLogger("ai_chat")
+DB_PATH = "bot_data.db"
 
 
-# --- MODAL FOR CUSTOM TIMEOUT ---
-class TimeoutModal(discord.ui.Modal, title="Timeout Configuration"):
-  duration_minutes = discord.ui.TextInput(
-      label="Duration (in minutes)",
-      placeholder="e.g., 10, 60, 1440",
-      default="10",
-      required=True,
-  )
-  reason = discord.ui.TextInput(
-      label="Reason",
-      placeholder="Enter reason for timeout...",
-      default="No reason provided",
-      required=False,
-  )
+class AIChatCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.ai_channels: dict[int, int] = {}
+        self.channel_history: dict[int, list[str]] = {}
+        self.channel_locks: dict[int, asyncio.Lock] = {}
+        self.user_memories: dict[tuple[int, int], str] = {}
+        self.stats: dict[str, int] = {"messages_sent": 0, "timeouts": 0, "bans": 0}
 
-  def __init__(self, target_member: discord.Member):
-    super().__init__()
-    self.target_member = target_member
-
-  async def on_submit(self, interaction: discord.Interaction):
-    try:
-      mins = int(self.duration_minutes.value)
-      delta = timedelta(minutes=mins)
-      await self.target_member.timeout(
-          delta, reason=f"{self.reason.value} (By: {interaction.user})"
-      )
-      await interaction.response.send_message(
-          f"⏳ **{self.target_member.display_name}** has been timed out for"
-          f" `{mins} minutes`. Reason: *{self.reason.value}*"
-      )
-    except Exception as e:
-      await interaction.response.send_message(
-          f"❌ Failed to timeout: {e}", ephemeral=True
-      )
-
-
-# --- MODAL FOR REASON-BASED ACTIONS (Kick/Ban) ---
-class ReasonModal(discord.ui.Modal):
-  reason = discord.ui.TextInput(
-      label="Reason",
-      placeholder="Enter reason...",
-      default="No reason provided",
-      required=False,
-  )
-
-  def __init__(self, target_member: discord.Member, action_type: str):
-    super().__init__(
-        title=f"{action_type.capitalize()} {target_member.display_name}"
-    )
-    self.target_member = target_member
-    self.action_type = action_type
-
-  async def on_submit(self, interaction: discord.Interaction):
-    try:
-      if self.action_type == "kick":
-        await self.target_member.kick(
-            reason=f"{self.reason.value} (By: {interaction.user})"
+        api_key = os.getenv("GEMINI_API_KEY")
+        self.client = (
+            genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=20000))
+            if api_key
+            else None
         )
-        await interaction.response.send_message(
-            f"👢 **{self.target_member.display_name}** has been kicked. Reason:"
-            f" *{self.reason.value}*"
-        )
-      elif self.action_type == "ban":
-        await self.target_member.ban(
-            reason=f"{self.reason.value} (By: {interaction.user})"
-        )
-        await interaction.response.send_message(
-            f"🔨 **{self.target_member.display_name}** has been banned. Reason:"
-            f" *{self.reason.value}*"
-        )
-    except Exception as e:
-      await interaction.response.send_message(
-          f"❌ Failed to execute {self.action_type}: {e}", ephemeral=True
-      )
+        self.models = [
+            "gemini-3.5-flash-lite",
+            "gemini-3.8-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-3.6-flash",
+        ]
+        self.current_model: str = "gemini-3.5-flash-lite"
 
+    async def cog_load(self):
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS ai_chat_channels ("
+                "guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL)"
+            )
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS user_memories ("
+                "guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, memory TEXT NOT NULL, "
+                "PRIMARY KEY (guild_id, user_id))"
+            )
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS bot_stats ("
+                "stat_key TEXT PRIMARY KEY, stat_value INTEGER NOT NULL DEFAULT 0)"
+            )
+            for k in self.stats:
+                await db.execute(
+                    "INSERT OR IGNORE INTO bot_stats (stat_key, stat_value) VALUES (?, 0)",
+                    (k,),
+                )
+            await db.commit()
 
-# --- MODAL FOR CUSTOM PURGE ---
-class PurgeModal(discord.ui.Modal, title="Custom Purge"):
-  amount = discord.ui.TextInput(
-      label="Number of messages to delete",
-      placeholder="e.g., 25, 50, 100",
-      default="10",
-      required=True,
-  )
+            async with db.execute("SELECT guild_id, channel_id FROM ai_chat_channels") as c:
+                for g, ch in await c.fetchall():
+                    self.ai_channels[g] = ch
 
-  async def on_submit(self, interaction: discord.Interaction):
-    try:
-      limit = int(self.amount.value)
-      if limit < 1:
-        await interaction.response.send_message(
-            "❌ Please specify a number greater than 0.", ephemeral=True
-        )
-        return
+            async with db.execute("SELECT guild_id, user_id, memory FROM user_memories") as c:
+                for g, u, m in await c.fetchall():
+                    self.user_memories[(g, u)] = m
 
-      deleted = await interaction.channel.purge(limit=limit)
-      await interaction.response.send_message(
-          f"🧹 Cleared `{len(deleted)}` messages by {interaction.user.mention}.",
-          ephemeral=False,
-      )
-    except Exception as e:
-      await interaction.response.send_message(
-          f"❌ Failed to purge messages: {e}", ephemeral=True
-      )
+            async with db.execute("SELECT stat_key, stat_value FROM bot_stats") as c:
+                for k, v in await c.fetchall():
+                    if k in self.stats:
+                        self.stats[k] = v
 
-
-# --- MODAL FOR BLACK BUTTON PASSCODE CONFIRMATION ---
-class BlackButtonModal(discord.ui.Modal, title="NUCLEAR PROTOCOL CONFIRMATION"):
-  passcode_input = discord.ui.TextInput(
-      label="Enter Passcode Shown in Embed",
-      placeholder="Type the exact passcode...",
-      required=True,
-  )
-
-  def __init__(self, correct_code: str):
-    super().__init__()
-    self.correct_code = correct_code
-
-  async def on_submit(self, interaction: discord.Interaction):
-    if self.passcode_input.value.strip() != self.correct_code:
-      await interaction.response.send_message(
-          "❌ **Incorrect Passcode!** Nuclear protocol aborted.", ephemeral=True
-      )
-      return
-
-    await interaction.response.send_message(
-        "💣 **PASSCODE ACCEPTED. INITIATING ABSOLUTE SERVER ANNIHILATION...**",
-        ephemeral=False,
-    )
-    guild = interaction.guild
-
-    # 1. Delete all roles except @everyone and managed/bot roles
-    for role in guild.roles:
-      if not role.is_default() and not role.managed and role < guild.me.top_role:
+    async def increment_stat(self, key: str, amount: int = 1):
+        self.stats[key] = self.stats.get(key, 0) + amount
         try:
-          await role.delete(reason=f"Black Button triggered by {interaction.user}")
-        except Exception:
-          pass
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT INTO bot_stats (stat_key, stat_value) VALUES (?, ?) "
+                    "ON CONFLICT(stat_key) DO UPDATE SET stat_value = stat_value + excluded.stat_value",
+                    (key, amount),
+                )
+                await db.commit()
+        except Exception as e:
+            logger.debug(f"Stat save failed: {e}")
 
-    # 2. Nuke/Clone every text channel
-    for channel in list(guild.text_channels):
-      try:
-        new_channel = await channel.clone(
-            reason=f"Black Button nuke by {interaction.user}"
+    async def auto_update_memory(self, guild_id: int, user_id: int, user_name: str, msg: str):
+        if not self.client or len(msg.strip()) < 6:
+            return
+        existing = self.user_memories.get((guild_id, user_id), "None")
+        prompt = (
+            f"Existing memory for {user_name}: {existing}\n"
+            f"New message from {user_name}: {msg}\n\n"
+            "Merge any lasting personal facts, preferences, name, or hobbies in under 400 characters. "
+            "If there are no new personal facts worth remembering, reply strictly with: NO_CHANGE"
         )
-        await new_channel.edit(position=channel.position)
-        await channel.delete()
-        if channel.id == interaction.channel.id:
-          await new_channel.send(
-              "⚫ **THE BLACK BUTTON HAS BEEN EXECUTED.** All roles have been"
-              f" purged and channels nuked by {interaction.user.mention}."
-          )
-      except Exception:
-        pass
-
-
-# --- BUTTON VIEWS ---
-class PunishmentView(discord.ui.View):
-
-  def __init__(self, target_member: discord.Member):
-    super().__init__(timeout=120)
-    self.target_member = target_member
-
-  @discord.ui.button(
-      label="Timeout", style=discord.ButtonStyle.blurple, emoji="⏳"
-  )
-  async def timeout_btn(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    await interaction.response.send_modal(TimeoutModal(self.target_member))
-
-  @discord.ui.button(
-      label="Remove Timeout", style=discord.ButtonStyle.green, emoji="🔊"
-  )
-  async def untimeout_btn(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    await self.target_member.timeout(
-        None, reason=f"Timeout removed by {interaction.user}"
-    )
-    await interaction.response.send_message(
-        f"🔊 Timeout removed for **{self.target_member.display_name}** by"
-        f" {interaction.user.mention}."
-    )
-
-  @discord.ui.button(
-      label="Kick", style=discord.ButtonStyle.gray, emoji="👢"
-  )
-  async def kick_btn(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    await interaction.response.send_modal(
-        ReasonModal(self.target_member, "kick")
-    )
-
-  @discord.ui.button(label="Ban", style=discord.ButtonStyle.red, emoji="🔨")
-  async def ban_btn(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    await interaction.response.send_modal(
-        ReasonModal(self.target_member, "ban")
-    )
-
-
-class ManageView(discord.ui.View):
-
-  def __init__(self):
-    super().__init__(timeout=120)
-
-  @discord.ui.button(
-      label="Lock Channel", style=discord.ButtonStyle.red, emoji="🔒"
-  )
-  async def lock_btn(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    await interaction.channel.set_permissions(
-        interaction.guild.default_role,
-        send_messages=False,
-        reason=f"Locked by {interaction.user}",
-    )
-    await interaction.response.send_message(
-        f"🔒 **{interaction.channel.name}** has been locked down by"
-        f" {interaction.user.mention}."
-    )
-
-  @discord.ui.button(
-      label="Unlock Channel", style=discord.ButtonStyle.green, emoji="🔓"
-  )
-  async def unlock_btn(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    await interaction.channel.set_permissions(
-        interaction.guild.default_role,
-        send_messages=True,
-        reason=f"Unlocked by {interaction.user}",
-    )
-    await interaction.response.send_message(
-        f"🔓 **{interaction.channel.name}** has been unlocked by"
-        f" {interaction.user.mention}."
-    )
-
-  @discord.ui.button(
-      label="Custom Purge", style=discord.ButtonStyle.gray, emoji="🧹"
-  )
-  async def purge_btn(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    await interaction.response.send_modal(PurgeModal())
-
-
-class BlackButtonView(discord.ui.View):
-
-  def __init__(self, passcode: str):
-    super().__init__(timeout=120)
-    self.passcode = passcode
-
-  @discord.ui.button(
-      label="PRESS BLACK BUTTON", style=discord.ButtonStyle.danger, emoji="🏴"
-  )
-  async def black_btn(
-      self, interaction: discord.Interaction, button: discord.ui.Button
-  ):
-    await interaction.response.send_modal(BlackButtonModal(self.passcode))
-
-
-# --- MODERATION COG ---
-class Moderation(commands.Cog):
-
-  def __init__(self, bot):
-    self.bot = bot
-
-  @app_commands.command(
-      name="punishment",
-      description="Open interactive punishment panel for a user",
-  )
-  @app_commands.checks.has_permissions(moderate_members=True)
-  async def punishment(
-      self, interaction: discord.Interaction, member: discord.Member
-  ):
-    embed = discord.Embed(
-        title="🛡️ Punishment Control Panel",
-        description=(
-            f"Target User: **{member.mention}** (`{member.id}`)\nClick a button"
-            " below to execute custom actions."
-        ),
-        color=discord.Color.red(),
-    )
-    view = PunishmentView(member)
-    await interaction.response.send_message(
-        embed=embed, view=view, ephemeral=False
-    )
-
-  @app_commands.command(
-      name="manage", description="Open channel and server management panel"
-  )
-  @app_commands.checks.has_permissions(manage_channels=True)
-  async def manage(self, interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="⚙️ Server & Channel Management",
-        description="Click a management action for this channel below.",
-        color=discord.Color.blue(),
-    )
-    view = ManageView()
-    await interaction.response.send_message(
-        embed=embed, view=view, ephemeral=False
-    )
-
-  @app_commands.command(
-      name="nuke",
-      description="Clone and delete the current channel to completely wipe messages",
-  )
-  @app_commands.checks.has_permissions(manage_channels=True)
-  async def nuke(self, interaction: discord.Interaction):
-    await interaction.response.send_message(
-        "💣 Nuking channel...", ephemeral=True
-    )
-    channel = interaction.channel
-    new_channel = await channel.clone(reason=f"Nuked by {interaction.user}")
-    await new_channel.edit(position=channel.position)
-    await channel.delete(reason=f"Nuked by {interaction.user}")
-    await new_channel.send(
-        f"💥 **Channel has been successfully nuked!** Action executed by"
-        f" {interaction.user.mention}."
-    )
-
-  @app_commands.command(
-      name="button", description="Access emergency server control buttons"
-  )
-  @app_commands.describe(
-      choice="Choose which emergency button to deploy: red, green, or black"
-  )
-  @app_commands.choices(
-      choice=[
-          app_commands.Choice(
-              name="Red Button (Nightmare Mode Lockdown)", value="red"
-          ),
-          app_commands.Choice(
-              name="Green Button (Restore Normal Permissions)", value="green"
-          ),
-          app_commands.Choice(
-              name="Black Button (Ultimate Nuclear Protocol)", value="black"
-          ),
-      ]
-  )
-  @app_commands.checks.has_permissions(administrator=True)
-  async def button(self, interaction: discord.Interaction, choice: str):
-    if choice == "red":
-      await interaction.response.send_message(
-          "🚨 **NIGHTMARE MODE ACTIVATED!** Stripping server channel"
-          " permissions...",
-          ephemeral=False,
-      )
-      guild = interaction.guild
-      for channel in guild.channels:
         try:
-          overwrite = channel.overwrites_for(guild.default_role)
-          overwrite.send_messages = False
-          overwrite.connect = False
-          overwrite.speak = False
-          await channel.set_permissions(
-              guild.default_role,
-              overwrite=overwrite,
-              reason=f"Nightmare Mode Red Button pressed by {interaction.user}",
-          )
-        except Exception:
-          pass
-      await interaction.followup.send(
-          "🔴 **The Red Button has been pulled.** All standard channels have"
-          " been completely locked down. Only administrators can speak or write."
-      )
+            res = await self.client.aio.models.generate_content(
+                model=self.current_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.2, max_output_tokens=150),
+            )
+            if res and res.text and "NO_CHANGE" not in res.text:
+                mem = res.text.strip()[:600]
+                self.user_memories[(guild_id, user_id)] = mem
+                async with aiosqlite.connect(DB_PATH) as db:
+                    await db.execute(
+                        "INSERT INTO user_memories (guild_id, user_id, memory) VALUES (?, ?, ?) "
+                        "ON CONFLICT(guild_id, user_id) DO UPDATE SET memory = excluded.memory",
+                        (guild_id, user_id, mem),
+                    )
+                    await db.commit()
+        except Exception as e:
+            logger.debug(f"Memory update skipped: {e}")
 
-    elif choice == "green":
-      await interaction.response.send_message(
-          "🟢 **REVERTING NIGHTMARE MODE...** Restoring standard channel"
-          " permissions...",
-          ephemeral=False,
-      )
-      guild = interaction.guild
-      for channel in guild.channels:
+    @staticmethod
+    def is_restricted_request(text: str) -> bool:
+        low = text.lower()
+        patterns = [
+            r"@everyone",
+            r"@here",
+            r"\b(ping|mention|tag)\s+(everyone|here|all|everybody|members|roles)\b",
+            r"\bmass\s*ping\b",
+            r"\bspam\s*ping\b",
+            r"\b(delete|remove|nuke|destroy)\s+(this\s+|the\s+|all\s+)?channels?\b",
+        ]
+        return any(re.search(p, low) for p in patterns) or len(re.findall(r"<@[!&]?\d+>", text)) >= 3
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        if (
+            before.timed_out_until == after.timed_out_until
+            or after.timed_out_until is None
+            or not self.bot.user
+            or not after.guild.me.guild_permissions.view_audit_log
+        ):
+            return
         try:
-          overwrite = channel.overwrites_for(guild.default_role)
-          overwrite.send_messages = None
-          overwrite.connect = None
-          overwrite.speak = None
-          await channel.set_permissions(
-              guild.default_role,
-              overwrite=overwrite,
-              reason=f"Green Button pressed by {interaction.user}",
-          )
+            await asyncio.sleep(0.8)
+            async for entry in after.guild.audit_logs(limit=3, action=discord.AuditLogAction.member_update):
+                if entry.target and entry.target.id == after.id:
+                    if entry.user and entry.user.id == self.bot.user.id:
+                        await self.increment_stat("timeouts")
+                    break
         except Exception:
-          pass
-      await interaction.followup.send(
-          "🟢 **The Green Button has been pressed.** All channels have been"
-          " restored to their normal permissions!"
-      )
+            pass
 
-    elif choice == "black":
-      passcode = "".join(
-          random.choices(string.ascii_uppercase + string.digits, k=6)
-      )
-      embed = discord.Embed(
-          title="🏴‍☠️ BLACK BUTTON - NUCLEAR PROTOCOL WARNING",
-          description=(
-              "**WARNING:** Pressing this button and entering the correct"
-              " passcode will **permanently delete all server roles** and"
-              " **nuke all channels**!\n\n"
-              f"🔐 **REQUIRED PASSCODE:** ```{passcode}```\n\n"
-              "Click the button below and type this passcode to confirm."
-          ),
-          color=discord.Color.dark_embed(),
-      )
-      view = BlackButtonView(passcode)
-      await interaction.response.send_message(
-          embed=embed, view=view, ephemeral=False
-      )
+    @commands.Cog.listener()
+    async def on_member_ban(self, guild: discord.Guild, user: discord.User):
+        if not self.bot.user or not guild.me.guild_permissions.view_audit_log:
+            return
+        try:
+            await asyncio.sleep(0.8)
+            async for entry in guild.audit_logs(limit=3, action=discord.AuditLogAction.ban):
+                if entry.target and entry.target.id == user.id:
+                    if entry.user and entry.user.id == self.bot.user.id:
+                        await self.increment_stat("bans")
+                    break
+        except Exception:
+            pass
 
+    def find_developer_mention(self, guild: discord.Guild) -> str:
+        for m in guild.members:
+            if "notgamer" in m.name.lower() or "notgamer" in m.display_name.lower():
+                return f"{m.mention} (**NoTGaMeR**)"
+        return "**NoTGaMeR**"
 
-async def setup(bot):
-  await bot.add_cog(Moderation(bot))
+    def build_server_context(self, guild: discord.Guild, ch: discord.abc.GuildChannel) -> str:
+        names = ", ".join([m.display_name for m in guild.members if not m.bot][:25]) or "unavailable"
+        tch = ", ".join([f"#{c.name}" for c in guild.text_channels if not c.is_nsfw()][:20]) or "none"
+        vch = ", ".join([c.name for c in guild.voice_channels][:10]) or "none"
+        cmds = " | ".join([f"/{c.name}: {c.description}" for c in self.bot.tree.get_commands()][:30]) or "standard"
+        return (
+            f"Server: {guild.name} | Channel: #{getattr(ch, 'name', 'unknown')} | "
+            f"Members: {guild.member_count or len(guild.members)} ({names})\n"
+            f"Text: {tch} | Voice: {vch}\nCommands: {cmds}"
+        )
+
+    @app_commands.command(name="setaichat", description="Set a specific channel for AI chat, Q&A, and auto memory.")
+    @app_commands.describe(channel="The text channel for AI chat")
+    @app_commands.default_permissions(administrator=True)
+    async def set_ai_chat(self, interaction: discord.Interaction, channel: discord.TextChannel):
+        if not interaction.guild or not self.client:
+            return await interaction.response.send_message(
+                "Run this inside a server with GEMINI_API_KEY configured.", ephemeral=True
+            )
+        self.ai_channels[interaction.guild.id] = channel.id
+        self.channel_history[channel.id] = []
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "INSERT INTO ai_chat_channels (guild_id, channel_id) VALUES (?, ?) "
+                "ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id",
+                (interaction.guild.id, channel.id),
+            )
+            await db.commit()
+        await interaction.response.send_message(f"✅ Fast Gemini AI chat enabled in {channel.mention}.")
+
+    @app_commands.command(name="clearaichat", description="Disable AI chat in this server.")
+    @app_commands.default_permissions(administrator=True)
+    async def clear_ai_chat(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return await interaction.response.send_message("Server only.", ephemeral=True)
+        removed = self.ai_channels.pop(interaction.guild.id, None)
+        if removed:
+            self.channel_history.pop(removed, None)
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM ai_chat_channels WHERE guild_id = ?", (interaction.guild.id,))
+            await db.commit()
+        await interaction.response.send_message("🗑️ AI chat disabled for this server.")
+
+    @app_commands.command(name="aistatus", description="View bot system status, active Gemini model, and stats.")
+    @app_commands.default_permissions(administrator=True)
+    async def ai_status(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return await interaction.response.send_message("Server only.", ephemeral=True)
+        embed = discord.Embed(
+            title="🤖 Bot System Status",
