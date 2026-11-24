@@ -21,8 +21,8 @@ class AIChatCog(commands.Cog):
         self.cooldowns: dict[str, float] = {}
         raw_keys = [os.getenv(n) for n in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3")]
         keys = list(dict.fromkeys(k.strip() for k in raw_keys if k and k.strip()))
-        self.clients = [genai.Client(vertexai=k.startswith("AQ."), api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in keys]
-        self.models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
+        self.clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in keys]
+        self.models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
         self.active_engine = "Gemini Ready"
 
     async def cog_load(self):
@@ -157,7 +157,6 @@ class AIChatCog(commands.Cog):
         tch = ", ".join([f"#{c.name}" for c in guild.text_channels if not c.is_nsfw()][:15]) or "none"
         roles = ", ".join([r.name for r in reversed(guild.roles) if not r.is_default() and not r.managed][:15]) or "none"
         return f"Server: {guild.name} | Server Owner (OS): {owner} | Created: {guild.created_at.strftime('%B %d, %Y')} | Members: {guild.member_count or len(guild.members)} | Channels: {tch} | Roles: {roles}"
-
     @app_commands.command(name="setaichat", description="Set a specific channel for AI chat, Q&A, and auto memory.")
     @app_commands.describe(channel="The text channel for AI chat")
     @app_commands.default_permissions(administrator=True)
@@ -197,6 +196,7 @@ class AIChatCog(commands.Cog):
         embed.add_field(name="⏳ Timeouts Done", value=f"`{self.stats.get('timeouts', 0):,}`", inline=True)
         embed.add_field(name="🔨 Bans Done", value=f"`{self.stats.get('bans', 0):,}`", inline=True)
         await interaction.response.send_message(embed=embed)
+
     async def generate_gemini_reply(self, system_prompt: str, prompt: str) -> tuple[str | None, str | None]:
         now = time.monotonic()
         last_err = None
@@ -207,7 +207,7 @@ class AIChatCog(commands.Cog):
                 if self.cooldowns.get(tag, 0) > now:
                     continue
                 try:
-                    res = await client.aio.models.generate_content(model=model_name, contents=prompt, config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.8, max_output_tokens=420, thinking_config=types.ThinkingConfig(thinking_budget=0), safety_settings=safety))
+                    res = await client.aio.models.generate_content(model=model_name, contents=prompt, config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.8, max_output_tokens=420, safety_settings=safety))
                     if res and res.text:
                         self.active_engine = f"Gemini Key#{idx + 1} ({model_name})"
                         return res.text.strip(), None
@@ -217,7 +217,6 @@ class AIChatCog(commands.Cog):
                         self.cooldowns[tag] = now + 300
                     last_err = f"{tag}: {e}"
         return None, last_err or "All Gemini keys/models are temporarily busy."
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not self.bot.user or not self.clients:
