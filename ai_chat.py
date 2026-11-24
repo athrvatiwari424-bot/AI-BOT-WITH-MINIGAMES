@@ -20,7 +20,6 @@ class AIChatCog(commands.Cog):
         self.channel_locks: dict[int, asyncio.Lock] = {}
         self.user_memories: dict[tuple[int, int], str] = {}
 
-        # Live & persistent bot stats
         self.stats: dict[str, int] = {
             "messages_sent": 0,
             "timeouts": 0,
@@ -28,7 +27,6 @@ class AIChatCog(commands.Cog):
         }
 
         api_key = os.getenv("GEMINI_API_KEY")
-        # 20s deadline so big tasks and detailed answers don't time out
         self.client = (
             genai.Client(
                 api_key=api_key,
@@ -38,7 +36,6 @@ class AIChatCog(commands.Cog):
             else None
         )
 
-        # Fast free-tier models ordered for low latency
         self.models = [
             "gemini-3.5-flash-lite",
             "gemini-3.1-flash-lite",
@@ -50,30 +47,21 @@ class AIChatCog(commands.Cog):
     async def cog_load(self):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS ai_chat_channels (
-                    guild_id INTEGER PRIMARY KEY,
-                    channel_id INTEGER NOT NULL
-                )
-                """
+                "CREATE TABLE IF NOT EXISTS ai_chat_channels ("
+                "guild_id INTEGER PRIMARY KEY, "
+                "channel_id INTEGER NOT NULL)"
             )
             await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS user_memories (
-                    guild_id INTEGER NOT NULL,
-                    user_id INTEGER NOT NULL,
-                    memory TEXT NOT NULL,
-                    PRIMARY KEY (guild_id, user_id)
-                )
-                """
+                "CREATE TABLE IF NOT EXISTS user_memories ("
+                "guild_id INTEGER NOT NULL, "
+                "user_id INTEGER NOT NULL, "
+                "memory TEXT NOT NULL, "
+                "PRIMARY KEY (guild_id, user_id))"
             )
             await db.execute(
-                """
-                CREATE TABLE IF NOT EXISTS bot_stats (
-                    stat_key TEXT PRIMARY KEY,
-                    stat_value INTEGER NOT NULL DEFAULT 0
-                )
-                """
+                "CREATE TABLE IF NOT EXISTS bot_stats ("
+                "stat_key TEXT PRIMARY KEY, "
+                "stat_value INTEGER NOT NULL DEFAULT 0)"
             )
             for key in self.stats:
                 await db.execute(
@@ -106,11 +94,8 @@ class AIChatCog(commands.Cog):
         try:
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute(
-                    """
-                    INSERT INTO bot_stats (stat_key, stat_value)
-                    VALUES (?, ?)
-                    ON CONFLICT(stat_key) DO UPDATE SET stat_value = stat_value + excluded.stat_value
-                    """,
+                    "INSERT INTO bot_stats (stat_key, stat_value) VALUES (?, ?) "
+                    "ON CONFLICT(stat_key) DO UPDATE SET stat_value = stat_value + excluded.stat_value",
                     (key, amount),
                 )
                 await db.commit()
@@ -119,7 +104,6 @@ class AIChatCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
-        """Automatically counts timeouts issued by this bot from any cog."""
         if before.timed_out_until == after.timed_out_until or after.timed_out_until is None:
             return
         if not self.bot.user or not after.guild.me.guild_permissions.view_audit_log:
@@ -139,7 +123,6 @@ class AIChatCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_member_ban(self, guild: discord.Guild, user: discord.User):
-        """Automatically counts bans issued by this bot from any cog."""
         if not self.bot.user or not guild.me.guild_permissions.view_audit_log:
             return
 
@@ -156,7 +139,6 @@ class AIChatCog(commands.Cog):
             logger.debug(f"Audit log ban check skipped: {e}")
 
     def find_developer_mention(self, guild: discord.Guild) -> str:
-        """Finds NoTGaMeR in the server to mention him, or falls back to his name."""
         for member in guild.members:
             if (
                 "notgamer" in member.name.lower()
@@ -201,18 +183,13 @@ class AIChatCog(commands.Cog):
     def build_server_context(
         self, guild: discord.Guild, current_channel: discord.abc.GuildChannel
     ) -> str:
-        # 1. Member info
         total_members = guild.member_count or len(guild.members)
-        human_names = [
-            m.display_name for m in guild.members if not m.bot
-        ][:25]
+        human_names = [m.display_name for m in guild.members if not m.bot][:25]
         members_preview = ", ".join(human_names) if human_names else "unavailable"
 
-        # 2. Channels info (cap to keep prompt short and fast)
         text_ch = [f"#{c.name}" for c in guild.text_channels if not c.is_nsfw()][:20]
         voice_ch = [c.name for c in guild.voice_channels][:10]
 
-        # 3. Bot commands info
         slash_cmds = [
             f"/{cmd.name}: {cmd.description}"
             for cmd in self.bot.tree.get_commands()
@@ -257,7 +234,27 @@ class AIChatCog(commands.Cog):
 
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute(
-                """
-                INSERT INTO ai_chat_channels (guild_id, channel_id)
-                VALUES (?, ?)
-                ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id
+                "INSERT INTO ai_chat_channels (guild_id, channel_id) VALUES (?, ?) "
+                "ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id",
+                (interaction.guild.id, channel.id),
+            )
+            await db.commit()
+
+        await interaction.response.send_message(
+            f"Fast Gemini AI chat enabled in {channel.mention}."
+        )
+
+    @app_commands.command(
+        name="clearaichat",
+        description="Disable AI chat in this server.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def clear_ai_chat(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "This command can only be used inside a server.", ephemeral=True
+            )
+
+        removed = self.ai_channels.pop(interaction.guild.id, None)
+        if removed:
+            self.channel_history.pop(removed, None)
