@@ -19,9 +19,10 @@ class AIChatCog(commands.Cog):
         self.user_memories: dict[tuple[int, int], str] = {}
         self.stats = {"messages_sent": 0, "timeouts": 0, "bans": 0}
         self.cooldowns: dict[str, float] = {}
-        keys = [k.strip() for k in (os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_2"), os.getenv("GEMINI_API_KEY_3")) if k and k.strip()]
-        self.clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in keys]
-        self.models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
+        raw_keys = [os.getenv(n) for n in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3", "GEMENI_API_KEY_2", "GEMENI_API_KEY_3")]
+        keys = list(dict.fromkeys(k.strip() for k in raw_keys if k and k.strip()))
+        self.clients = [genai.Client(vertexai=k.startswith("AQ."), api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in keys]
+        self.models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
         self.active_engine = "Gemini Ready"
 
     async def cog_load(self):
@@ -191,6 +192,7 @@ class AIChatCog(commands.Cog):
         embed = discord.Embed(title="🤖 Bot System Status", description=f"Developed & maintained completely by {self.find_developer_mention(interaction.guild)}.", color=discord.Color.blurple())
         embed.add_field(name="🏓 Ping", value=f"`{round(self.bot.latency * 1000)} ms`", inline=True)
         embed.add_field(name="🧠 Active Gemini Engine", value=f"`{self.active_engine}`", inline=True)
+        embed.add_field(name="🔑 Loaded Keys", value=f"`{len(self.clients)}`", inline=True)
         embed.add_field(name="💬 Messages Sent", value=f"`{self.stats.get('messages_sent', 0):,}`", inline=True)
         embed.add_field(name="⏳ Timeouts Done", value=f"`{self.stats.get('timeouts', 0):,}`", inline=True)
         embed.add_field(name="🔨 Bans Done", value=f"`{self.stats.get('bans', 0):,}`", inline=True)
