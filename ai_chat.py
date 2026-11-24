@@ -215,7 +215,7 @@ class AIChatCog(commands.Cog):
         embed.add_field(name="⏳ Timeouts Done", value=f"`{self.stats.get('timeouts', 0):,}`", inline=True)
         embed.add_field(name="🔨 Bans Done", value=f"`{self.stats.get('bans', 0):,}`", inline=True)
         await interaction.response.send_message(embed=embed)
-     async def call_openai_compatible(self, url: str, api_key: str, model: str, system_prompt: str, prompt: str) -> str | None:
+    async def call_openai_compatible(self, url: str, api_key: str, model: str, system_prompt: str, prompt: str) -> str | None:
         session = await self.get_session()
         headers = {"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json", "Accept": "application/json"}
         if "github" in url:
@@ -269,7 +269,6 @@ class AIChatCog(commands.Cog):
                 self.cooldowns[label] = now + 120
                 last_err = f"{label}: {e}"
         return None, last_err or "All AI providers busy—try again in a moment."
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not self.bot.user or not self.has_any_ai():
