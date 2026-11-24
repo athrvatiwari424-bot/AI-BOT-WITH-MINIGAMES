@@ -219,13 +219,16 @@ class AIChatCog(commands.Cog):
         await interaction.response.send_message(embed=embed)
     async def call_openai_compatible(self, url: str, api_key: str, model: str, system_prompt: str, prompt: str) -> str | None:
         session = await self.get_session()
-        headers = {"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json", "Accept": "application/json", "X-GitHub-Api-Version": "2022-11-28"}
+        headers = {"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json", "Accept": "application/json"}
+        if "github" in url:
+            headers["X-GitHub-Api-Version"] = "2022-11-28"
         payload = {"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], "temperature": 0.8, "max_tokens": 420}
         async with session.post(url, headers=headers, json=payload) as resp:
             if resp.status == 200 and "application/json" in (resp.headers.get("Content-Type") or ""):
                 data = await resp.json()
                 choices = data.get("choices") or []
-                return choices[0]["message"]["content"].strip() if choices else None
+                first = choices.pop(0) if choices else None
+                return first["message"]["content"].strip() if first else None
             err_txt = await resp.text()
             raise RuntimeError(f"HTTP {resp.status}: {err_txt[:80]}")
 
@@ -254,7 +257,8 @@ class AIChatCog(commands.Cog):
             ("GitHub Models (gpt-4o-mini)", "https://github.ai", gh_key, "openai/gpt-4o-mini"),
             ("GitHub Models (Llama-3.3-70B)", "https://github.ai", gh_key, "meta/Llama-3.3-70B-Instruct"),
             ("OpenRouter (llama-3.3-70b)", "https://openrouter.ai", or_key, "meta-llama/llama-3.3-70b-instruct:free"),
-            ("OpenRouter (free-auto)", "https://openrouter.ai", or_key, "openrouter/free"),
+            ("OpenRouter (gemma-3-27b)", "https://openrouter.ai", or_key, "google/gemma-3-27b-it:free"),
+            ("OpenRouter (mistral-small)", "https://openrouter.ai", or_key, "mistralai/mistral-small-3.1-24b-instruct:free"),
             ("Cerebras (llama3.1-8b)", "https://cerebras.ai", self.get_key("CEREBRAS_API_KEY"), "llama3.1-8b"),
             ("Groq (llama-3.1-8b)", "https://groq.com", self.get_key("GROQ_API_KEY"), "llama-3.1-8b-instant"),
             ("Mistral (mistral-small)", "https://mistral.ai", self.get_key("MISTRAL_API_KEY"), "mistral-small-latest"),
