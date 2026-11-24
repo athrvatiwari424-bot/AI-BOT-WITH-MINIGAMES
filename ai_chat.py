@@ -22,7 +22,7 @@ class AIChatCog(commands.Cog):
         self.http_session: aiohttp.ClientSession | None = None
 
         gemini_keys = [k for k in (os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_2"), os.getenv("GEMINI_API_KEY_3")) if k]
-        self.gemini_clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=8000)) for k in gemini_keys]
+        self.gemini_clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in gemini_keys]
         self.gemini_models = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
         self.active_provider = "Ready (Turbo Auto-Failover)"
 
