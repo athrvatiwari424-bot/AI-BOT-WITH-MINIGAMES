@@ -102,6 +102,20 @@ class AIChatCog(commands.Cog):
         except Exception as e:
             logger.debug(f"Failed to persist stat {key}: {e}")
 
+    async def save_user_memory(self, guild_id: int, user_id: int, memory: str):
+        memory = memory.strip()[:500]
+        self.user_memories[(guild_id, user_id)] = memory
+        try:
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "INSERT INTO user_memories (guild_id, user_id, memory) VALUES (?, ?, ?) "
+                    "ON CONFLICT(guild_id, user_id) DO UPDATE SET memory = excluded.memory",
+                    (guild_id, user_id, memory),
+                )
+                await db.commit()
+        except Exception as e:
+            logger.debug(f"Failed to persist user memory: {e}")
+
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         if before.timed_out_until == after.timed_out_until or after.timed_out_until is None:
@@ -156,7 +170,7 @@ class AIChatCog(commands.Cog):
             description=f"Developed & maintained completely by {dev_display}.",
             color=discord.Color.blurple(),
         )
-        embed.add_field(name="📡 Ping", value=f"`{ping_ms} ms`", inline=True)
+        embed.add_field(name="🏓 Ping", value=f"`{ping_ms} ms`", inline=True)
         embed.add_field(
             name="🧠 Active Gemini Model",
             value=f"`{self.current_model}`",
@@ -225,7 +239,7 @@ class AIChatCog(commands.Cog):
 
         if not self.client:
             return await interaction.response.send_message(
-                "GEMINI_API_KEY is not configured in Render environment variables.",
+                "GEMINI_API_KEY is not configured in environment variables.",
                 ephemeral=True,
             )
 
@@ -241,20 +255,3 @@ class AIChatCog(commands.Cog):
             await db.commit()
 
         await interaction.response.send_message(
-            f"Fast Gemini AI chat enabled in {channel.mention}."
-        )
-
-    @app_commands.command(
-        name="clearaichat",
-        description="Disable AI chat in this server.",
-    )
-    @app_commands.default_permissions(administrator=True)
-    async def clear_ai_chat(self, interaction: discord.Interaction):
-        if not interaction.guild:
-            return await interaction.response.send_message(
-                "This command can only be used inside a server.", ephemeral=True
-            )
-
-        removed = self.ai_channels.pop(interaction.guild.id, None)
-        if removed:
-            self.channel_history.pop(removed, None)
