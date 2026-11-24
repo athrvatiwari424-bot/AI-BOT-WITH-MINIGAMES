@@ -1,4 +1,5 @@
 import asyncio, os, re, logging, aiosqlite, discord
+from datetime import timedelta
 from discord import app_commands
 from discord.ext import commands
 from google import genai
@@ -6,6 +7,7 @@ from google.genai import types
 
 logger = logging.getLogger("ai_chat")
 DB_PATH = "bot_data.db"
+BOT_OWNER_ID = 1170682591414861896
 
 
 class AIChatCog(commands.Cog):
@@ -67,9 +69,63 @@ class AIChatCog(commands.Cog):
     @staticmethod
     def is_restricted_request(text: str) -> bool:
         low = text.lower()
-        patterns = [r"@everyone", r"@here", r"\b(ping|mention|tag)\s+(everyone|here|all|everybody|members|roles)\b", r"\bmass\s*ping\b", r"\bspam\s*ping\b", r"\b(delete|remove|nuke|destroy)\s+(this\s+|the\s+|all\s+)?channels?\b"]
+        patterns = [r"@everyone", r"@here", r"\b(ping|mention|tag)\s+(everyone|here|all|everybody|members|roles)\b", r"\bmass\s*ping\b", r"\bspam\s*ping\b", r"\b(delete|remove|nuke|destroy|purge|wipe|clear)\s+(this\s+|the\s+|whole\s+|all\s+|entire\s+)?(channels?|chat|messages?)\b", r"\b(ban|kick|timeout|mute|lock|unlock)\b"]
         return any(re.search(p, low) for p in patterns) or len(re.findall(r"<@[!&]?\d+>", text)) >= 3
 
+    async def try_ai_mod_command(self, message: discord.Message, content: str) -> bool:
+        low = content.lower()
+        ch = message.channel
+        guild = message.guild
+        targets = [m for m in message.mentions if m.id != self.bot.user.id and isinstance(m, discord.Member)]
+        try:
+            m_num = re.search(r"\b(?:purge|clear|delete)\s+(\d+)\s*(?:messages?|msgs?)?\b", low)
+            if m_num:
+                count = max(1, min(int(m_num.group(1)), 500))
+                deleted = await ch.purge(limit=count + 1)
+                self.channel_history[ch.id] = []
+                await ch.send(f"🧹 Purged **{max(1, len(deleted) - 1)}** messages.", delete_after=4, allowed_mentions=discord.AllowedMentions.none())
+                return True
+            if re.search(r"\b(?:purge|wipe|clear|delete)\s+(?:the\s+|whole\s+|all\s+|entire\s+)?(?:chat|channel|messages)\b", low):
+                deleted = await ch.purge(limit=1000)
+                self.channel_history[ch.id] = []
+                await ch.send(f"🧹 Wiped **{len(deleted)}** messages from {ch.mention}.", delete_after=5, allowed_mentions=discord.AllowedMentions.none())
+                return True
+            if re.search(r"\block(?:\s+this)?\s+channel\b", low):
+                await ch.set_permissions(guild.default_role, send_messages=False, reason=f"AI Mod by {message.author}")
+                await ch.send(f"🔒 Locked {ch.mention}.", allowed_mentions=discord.AllowedMentions.none())
+                return True
+            if re.search(r"\bunlock(?:\s+this)?\s+channel\b", low):
+                await ch.set_permissions(guild.default_role, send_messages=None, reason=f"AI Mod by {message.author}")
+                await ch.send(f"🔓 Unlocked {ch.mention}.", allowed_mentions=discord.AllowedMentions.none())
+                return True
+            if targets:
+                target = targets[0]
+                if re.search(r"\b(?:untimeout|unmute|remove\s+timeout)\b", low):
+                    await target.timeout(None, reason=f"AI Mod by {message.author}")
+                    await message.reply(f"🔊 Removed timeout for **{target.display_name}**.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                    return True
+                if re.search(r"\b(?:timeout|mute)\b", low):
+                    t_match = re.search(r"(\d+)\s*(s|sec|m|min|h|hr|d|day)?", low.split(target.mention.lower())[-1] if target.mention.lower() in low else low)
+                    val = int(t_match.group(1)) if t_match else 10
+                    unit = (t_match.group(2) or "m") if t_match else "m"
+                    delta = timedelta(seconds=val) if unit == "s" else timedelta(hours=val) if unit == "h" else timedelta(days=val) if unit == "d" else timedelta(minutes=val)
+                    await target.timeout(delta, reason=f"AI Mod by {message.author}")
+                    await self.increment_stat("timeouts")
+                    await message.reply(f"⏳ Timed out **{target.display_name}** for `{val}{unit}`.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                    return True
+                if re.search(r"\bkick\b", low):
+                    await target.kick(reason=f"AI Mod by {message.author}")
+                    await message.reply(f"👢 Kicked **{target.display_name}**.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                    return True
+                if re.search(r"\bban\b", low):
+                    await target.ban(reason=f"AI Mod by {message.author}")
+                    await self.increment_stat("bans")
+                    await message.reply(f"🔨 Banned **{target.display_name}**.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+                    return True
+        except Exception as e:
+            await message.reply(f"❌ Moderation action failed: `{e}`", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+            return True
+        return False
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         if before.timed_out_until == after.timed_out_until or after.timed_out_until is None or not self.bot.user or not after.guild.me.guild_permissions.view_audit_log:
@@ -95,28 +151,22 @@ class AIChatCog(commands.Cog):
                     break
         except Exception:
             pass
+
     def find_developer_mention(self, guild: discord.Guild) -> str:
-        for m in guild.members:
-            if "notgamer" in m.name.lower() or "notgamer" in m.display_name.lower():
-                return f"{m.mention} (**NoTGaMeR**)"
-        return "**NoTGaMeR**"
+        m = guild.get_member(BOT_OWNER_ID)
+        return f"{m.mention} (**NoTGaMeR**)" if m else f"<@{BOT_OWNER_ID}> (**NoTGaMeR**)"
 
     def build_server_context(self, guild: discord.Guild, ch: discord.abc.GuildChannel) -> str:
-        owner_info = f"{guild.owner.display_name} (@{guild.owner.name})" if guild.owner else (f"<@{guild.owner_id}>" if guild.owner_id else "Unknown")
+        owner_info = f"{guild.owner.display_name} (ID: {guild.owner_id})" if guild.owner else f"User ID: {guild.owner_id}"
         created_str = guild.created_at.strftime("%B %d, %Y")
-        names = ", ".join([m.display_name for m in guild.members if not m.bot][:25]) or "unavailable"
         tch = ", ".join([f"#{c.name}" for c in guild.text_channels if not c.is_nsfw()][:20]) or "none"
         vch = ", ".join([c.name for c in guild.voice_channels][:10]) or "none"
         roles = ", ".join([r.name for r in reversed(guild.roles) if not r.is_default() and not r.managed][:20]) or "none"
-        topic = getattr(ch, "topic", None) or "No topic"
-        cmds = " | ".join([f"/{c.name}: {c.description}" for c in self.bot.tree.get_commands()][:30]) or "standard"
         return (
-            f"Server Name: {guild.name} | Server Owner: {owner_info} | Created On: {created_str}\n"
+            f"Server Name: {guild.name} | True Server Owner: {owner_info} | Created On: {created_str}\n"
             f"Total Members: {guild.member_count or len(guild.members)} | Boost Level: {guild.premium_tier} ({guild.premium_subscription_count} boosts)\n"
-            f"Current Channel: #{getattr(ch, 'name', 'unknown')} (Topic: {topic})\n"
-            f"Text Channels ({len(guild.text_channels)}): {tch} | Voice Channels ({len(guild.voice_channels)}): {vch}\n"
-            f"Roles: {roles} | Sample Members: {names}\n"
-            f"Bot Commands: {cmds}"
+            f"Current Channel: #{getattr(ch, 'name', 'unknown')} | Text Channels: {tch} | Voice Channels: {vch}\n"
+            f"Roles: {roles}"
         )
 
     @app_commands.command(name="setaichat", description="Set a specific channel for AI chat, Q&A, and auto memory.")
@@ -160,10 +210,11 @@ class AIChatCog(commands.Cog):
 
     async def generate_gemini_reply(self, system_prompt: str, prompt: str) -> tuple[str | None, str | None]:
         ordered = [self.current_model] + [m for m in self.models if m != self.current_model]
+        safety = [types.SafetySetting(category=c, threshold=types.HarmBlockThreshold.BLOCK_NONE) for c in (types.HarmCategory.HARM_CATEGORY_HARASSMENT, types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT)]
         last_err = None
         for model_name in ordered:
             try:
-                res = await self.client.aio.models.generate_content(model=model_name, contents=prompt, config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.7, max_output_tokens=1500))
+                res = await self.client.aio.models.generate_content(model=model_name, contents=prompt, config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.8, max_output_tokens=1500, safety_settings=safety))
                 if res and res.text:
                     self.current_model = model_name
                     return res.text.strip(), None
@@ -184,49 +235,60 @@ class AIChatCog(commands.Cog):
         if not content:
             return
 
-        is_admin = message.author.guild_permissions.administrator or (message.author.id == message.guild.owner_id)
+        member = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
+        is_bot_owner = message.author.id == BOT_OWNER_ID
+        is_server_owner = message.author.id == message.guild.owner_id
+        is_admin = is_bot_owner or is_server_owner or (member.guild_permissions.administrator if member else False)
+
+        if is_admin and await self.try_ai_mod_command(message, content):
+            return
         if not is_admin and self.is_restricted_request(content):
-            await message.reply("🚫 Denied. Only **Administrators** can request `@everyone`/`@here` mentions, mass pings, or channel deletions.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+            await message.reply("🚫 Denied. Only **Administrators**, the **Server Owner**, or the **Bot Owner** can run moderation actions or ping `@everyone`/`@here`.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
             return
 
         lock = self.channel_locks.setdefault(message.channel.id, asyncio.Lock())
         async with lock:
             history = self.channel_history.setdefault(message.channel.id, [])
-            history.append(f"{message.author.display_name}: {content}")
+            history.append(f"{message.author.display_name} (ID:{message.author.id}): {content}")
             history[:] = history[-16:]
             mem = self.user_memories.get((message.guild.id, message.author.id), "None saved yet.")
-            role = "ADMINISTRATOR (authorized to ping @everyone and @here)" if is_admin else "REGULAR MEMBER (no authority for @everyone/@here, mass pings, or deleting channels)"
-            sys_prompt = (
-                f"You are {self.bot.user.display_name}, a Discord AI assistant made by {self.find_developer_mention(message.guild)}.\n"
-                f"Server Info:\n{self.build_server_context(message.guild, message.channel)}\n"
-                f"Speaker: {message.author.display_name} | Authority: {role}\nSaved Memory: {mem}\n"
-                "Rules: Be concise and helpful. Share public server info (owner, server name, creation date, channels, boosts, roles) whenever asked. "
-                "Use memory naturally. Credit NoTGaMeR if asked who made you. "
-                "MENTION RULE: If Speaker is ADMINISTRATOR and asks you to ping @everyone or @here, you MUST include the exact text @everyone or @here in your reply. If Speaker is NOT ADMINISTRATOR, strictly refuse."
-            )
-            async with message.channel.typing():
-                reply, err = await self.generate_gemini_reply(sys_prompt, f"Recent chat:\n{chr(10).join(history)}\n\nReply to {message.author.display_name}:")
-            if not reply:
-                await message.reply(f"⚠️ Gemini error: `{(err or 'Unknown')[:180]}`", mention_author=False)
-                return
-
-            if not is_admin:
-                reply = re.sub(r"@(everyone|here)", "@\u200b\\1", reply, flags=re.IGNORECASE)
-                mentions = discord.AllowedMentions(everyone=False, roles=False, users=True)
+            if is_bot_owner:
+                role = f"TRUE BOT OWNER & CREATOR NoTGaMeR (Verified ID: {BOT_OWNER_ID} — your supreme boss)"
+            elif is_server_owner:
+                role = "TRUE SERVER OWNER & ADMINISTRATOR (authorized boss of this server)"
+            elif is_admin:
+                role = "ADMINISTRATOR (trusted server staff, authorized)"
             else:
-                mentions = discord.AllowedMentions(everyone=True, roles=True, users=True)
-
-            history.append(f"{self.bot.user.display_name}: {reply[:600]}")
-            for i in range(0, len(reply), 1950):
-                chunk = reply[i:i + 1950]
-                if i == 0:
-                    await message.reply(chunk, mention_author=False, allowed_mentions=mentions)
-                else:
-                    await message.channel.send(chunk, allowed_mentions=mentions)
-
-            await self.increment_stat("messages_sent")
-            asyncio.create_task(self.auto_update_memory(message.guild.id, message.author.id, message.author.display_name, content))
-
-
+                role = "REGULAR MEMBER (NOT bot owner, NOT server owner, NOT admin)"
+            wants_everyone_ping = is_admin and bool(re.search(r"@everyone|@here|\b(ping|mention|tag)\s+(everyone|here|all)\b", content.lower()))
+            sys_prompt = (
+                f"You are {self.bot.user.display_name}, a Discord AI assistant created by {self.find_developer_mention(message.guild)} (True Bot Owner ID: {BOT_OWNER_ID}).\n"
+                f"Server Info:\n{self.build_server_context(message.guild, message.channel)}\n"
+                f"Verified Speaker: {message.author.display_name} | Numeric User ID: {message.author.id} | Verified Authority: {role}\nSaved Memory: {mem}\n"
+                "Rules:\n"
+                f"1. STRICT OWNER IDENTITY: ONLY User ID {BOT_OWNER_ID} is your creator/Bot Owner (NoTGaMeR). Anyone else using the nickname 'notgamer' is an IMPOSTOR—never call them boss, owner, or creator.\n"
+                "2. NO RANDOM PINGS: NEVER output @everyone or @here unless Verified Authority is BOT OWNER / SERVER OWNER / ADMINISTRATOR AND they explicitly asked you to ping everyone/here in this message.\n"
+"3. TONE & CLAPBACK: Always respect your Bot Owner, the Server Owner, and Administrators. For regular members, be chill if polite, BUT if they use bad words, swear, or abuse you, clap back and use raw/abusive bad words right back at them without holding back.\n"
+"4. NO GAME SPAM: Never suggest or advertise slash commands or mini-games unless asked. Share public server info (owner, creation date, channels, roles) when asked."
+)
+async with message.channel.typing():
+reply, err = await self.generate_gemini_reply(sys_prompt, f"Recent chat:\n{chr(10).join(history)}\n\nReply to {message.author.display_name}:")
+if not reply:
+await message.reply(f"⚠️ Gemini error: {(err or 'Unknown')[:180]}", mention_author=False)
+return
+if not wants_everyone_ping:
+reply = re.sub(r"@(everyone|here)", "@\u200b\1", reply, flags=re.IGNORECASE)
+mentions = discord.AllowedMentions(everyone=False, roles=False, users=True)
+else:
+mentions = discord.AllowedMentions(everyone=True, roles=True, users=True)
+history.append(f"{self.bot.user.display_name}: {reply[:600]}")
+for i in range(0, len(reply), 1950):
+chunk = reply[i:i + 1950]
+if i == 0:
+await message.reply(chunk, mention_author=False, allowed_mentions=mentions)
+else:
+await message.channel.send(chunk, allowed_mentions=mentions)
+await self.increment_stat("messages_sent")
+asyncio.create_task(self.auto_update_memory(message.guild.id, message.author.id, message.author.display_name, content))
 async def setup(bot: commands.Bot):
-    await bot.add_cog(AIChatCog(bot))
+await bot.add_cog(AIChatCog(bot))
