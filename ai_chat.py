@@ -21,17 +21,24 @@ class AIChatCog(commands.Cog):
         self.cooldowns: dict[str, float] = {}
         self.http_session: aiohttp.ClientSession | None = None
 
-        gemini_keys = [k for k in (os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_2"), os.getenv("GEMINI_API_KEY_3")) if k]
+        gemini_keys = [k.strip() for k in (os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_2"), os.getenv("GEMINI_API_KEY_3")) if k and k.strip()]
         self.gemini_clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in gemini_keys]
-        self.gemini_models = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
-        self.active_provider = "Ready (Turbo Auto-Failover)"
+        self.gemini_models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+        self.active_provider = "Ready (Multi-AI)"
+
+    def get_key(self, *names: str) -> str:
+        for name in names:
+            val = os.getenv(name)
+            if val and val.strip():
+                return val.strip()
+        return ""
 
     def has_any_ai(self) -> bool:
-        return bool(self.gemini_clients or os.getenv("OPENROUTER_API_KEY") or os.getenv("GROQ_API_KEY") or os.getenv("CEREBRAS_API_KEY") or os.getenv("GITHUB_TOKEN") or os.getenv("MISTRAL_API_KEY"))
+        return bool(self.gemini_clients or self.get_key("OPENROUTER_API_KEY", "Open router") or self.get_key("GITHUB_TOKEN") or self.get_key("GROQ_API_KEY") or self.get_key("CEREBRAS_API_KEY") or self.get_key("MISTRAL_API_KEY"))
 
     async def get_session(self) -> aiohttp.ClientSession:
         if self.http_session is None or self.http_session.closed:
-            self.http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=9))
+            self.http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
         return self.http_session
 
     async def cog_unload(self):
@@ -83,7 +90,7 @@ class AIChatCog(commands.Cog):
     @staticmethod
     def is_restricted_request(text: str) -> bool:
         low = text.lower()
-        patterns = [r"@everyone", r"@here", r"\b(ping|mention|tag)\s+(everyone|here|all|everybody|members|roles)\b", r"\bmass\s*ping\b", r"\bspam\s*ping\b", r"\b(delete|remove|nuke|destroy|purge|wipe|clear)\s+(this\s+|the\s+|whole\s+|all\s+|entire\s+)?(channels?|chat|messages?)\b", r"\b(ban|kick|timeout|mute|lock|unlock)\b"]
+        patterns = [r"@everyone", r"@here", r"\b(ping|mention|tag)\s+(everyone|here|all|everybody|members|roles)\b", r"\bmass\s*ping\b", r"\bspam\s*ping\b", r"\b(delete|remove|nuke|destroy|purge|wipe|clear)\s+(all|everything|(?:this\s+|the\s+|whole\s+|all\s+|entire\s+)?(?:channels?|chat|messages?))\b", r"\b(ban|kick|timeout|mute|lock|unlock)\b"]
         return any(re.search(p, low) for p in patterns) or len(re.findall(r"<@[!&]?\d+>", text)) >= 3
 
     async def try_ai_mod_command(self, message: discord.Message, content: str) -> bool:
@@ -96,7 +103,7 @@ class AIChatCog(commands.Cog):
                 self.channel_history[ch.id] = []
                 await ch.send(f"🧹 Purged **{max(1, len(deleted) - 1)}** messages.", delete_after=4, allowed_mentions=discord.AllowedMentions.none())
                 return True
-            if re.search(r"\b(?:purge|wipe|clear|delete)\s+(?:the\s+|whole\s+|all\s+|entire\s+)?(?:chat|channel|messages)\b", low):
+            if re.search(r"\b(?:purge|wipe|clear|delete)\s+(?:all|everything|(?:the\s+|whole\s+|all\s+|entire\s+)?(?:chat|channel|messages))\b", low):
                 deleted = await ch.purge(limit=1000)
                 self.channel_history[ch.id] = []
                 await ch.send(f"🧹 Wiped **{len(deleted)}** messages from {ch.mention}.", delete_after=5, allowed_mentions=discord.AllowedMentions.none())
@@ -183,7 +190,7 @@ class AIChatCog(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("INSERT INTO ai_chat_channels (guild_id, channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id", (interaction.guild.id, channel.id))
             await db.commit()
-        await interaction.response.send_message(f"✅ Turbo Multi-AI Liebe chat enabled in {channel.mention}.")
+        await interaction.response.send_message(f"✅ Multi-AI Liebe chat enabled in {channel.mention}.")
 
     @app_commands.command(name="clearaichat", description="Disable AI chat in this server.")
     @app_commands.default_permissions(administrator=True)
@@ -212,15 +219,15 @@ class AIChatCog(commands.Cog):
         await interaction.response.send_message(embed=embed)
     async def call_openai_compatible(self, url: str, api_key: str, model: str, system_prompt: str, prompt: str) -> str | None:
         session = await self.get_session()
-        headers = {"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json", "HTTP-Referer": "https://onrender.com", "X-Title": "Liebe Discord Bot"}
+        headers = {"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json", "Accept": "application/json", "X-GitHub-Api-Version": "2022-11-28"}
         payload = {"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], "temperature": 0.8, "max_tokens": 420}
         async with session.post(url, headers=headers, json=payload) as resp:
-            if resp.status == 200:
+            if resp.status == 200 and "application/json" in (resp.headers.get("Content-Type") or ""):
                 data = await resp.json()
                 choices = data.get("choices") or []
-                return choices["message"]["content"].strip() if choices else None
+                return choices[0]["message"]["content"].strip() if choices else None
             err_txt = await resp.text()
-            raise RuntimeError(f"HTTP {resp.status}: {err_txt[:90]}")
+            raise RuntimeError(f"HTTP {resp.status}: {err_txt[:80]}")
 
     async def generate_ai_reply(self, system_prompt: str, prompt: str, fast_only: bool = False) -> tuple[str | None, str | None]:
         now = time.monotonic()
@@ -241,15 +248,16 @@ class AIChatCog(commands.Cog):
                     last_err = f"{tag}: {e}"
                     logger.warning(f"{tag} cooled down 90s: {e}")
 
-        or_key = (os.getenv("OPENROUTER_API_KEY") or "").strip()
+        gh_key = self.get_key("GITHUB_TOKEN")
+        or_key = self.get_key("OPENROUTER_API_KEY", "Open router")
         fallbacks = [
+            ("GitHub Models (gpt-4o-mini)", "https://github.ai", gh_key, "openai/gpt-4o-mini"),
+            ("GitHub Models (Llama-3.3-70B)", "https://github.ai", gh_key, "meta/Llama-3.3-70B-Instruct"),
             ("OpenRouter (llama-3.3-70b)", "https://openrouter.ai", or_key, "meta-llama/llama-3.3-70b-instruct:free"),
-            ("OpenRouter (mistral-small)", "https://openrouter.ai", or_key, "mistralai/mistral-small-3.1-24b-instruct:free"),
             ("OpenRouter (free-auto)", "https://openrouter.ai", or_key, "openrouter/free"),
-            ("Cerebras (llama3.1-8b)", "https://cerebras.ai", (os.getenv("CEREBRAS_API_KEY") or "").strip(), "llama3.1-8b"),
-            ("Groq (llama-3.1-8b)", "https://groq.com", (os.getenv("GROQ_API_KEY") or "").strip(), "llama-3.1-8b-instant"),
-            ("GitHub Models (gpt-4o-mini)", "https://azure.com", (os.getenv("GITHUB_TOKEN") or "").strip(), "gpt-4o-mini"),
-            ("Mistral (mistral-small)", "https://mistral.ai", (os.getenv("MISTRAL_API_KEY") or "").strip(), "mistral-small-latest"),
+            ("Cerebras (llama3.1-8b)", "https://cerebras.ai", self.get_key("CEREBRAS_API_KEY"), "llama3.1-8b"),
+            ("Groq (llama-3.1-8b)", "https://groq.com", self.get_key("GROQ_API_KEY"), "llama-3.1-8b-instant"),
+            ("Mistral (mistral-small)", "https://mistral.ai", self.get_key("MISTRAL_API_KEY"), "mistral-small-latest"),
         ]
         for label, url, key, model in fallbacks:
             if not key or self.cooldowns.get(label, 0) > now:
