@@ -19,10 +19,10 @@ class AIChatCog(commands.Cog):
         self.user_memories: dict[tuple[int, int], str] = {}
         self.stats = {"messages_sent": 0, "timeouts": 0, "bans": 0}
         self.cooldowns: dict[str, float] = {}
-        raw_keys = [os.getenv(n) for n in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3", "GEMENI_API_KEY_2", "GEMENI_API_KEY_3")]
+        raw_keys = [os.getenv(n) for n in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3")]
         keys = list(dict.fromkeys(k.strip() for k in raw_keys if k and k.strip()))
-        self.clients = [genai.Client(vertexai=k.startswith("AQ."), api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in keys]
-        self.models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
+        self.clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in keys]
+        self.models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
         self.active_engine = "Gemini Ready"
 
     async def cog_load(self):
@@ -213,7 +213,7 @@ class AIChatCog(commands.Cog):
                         return res.text.strip(), None
                 except Exception as e:
                     err_s = str(e)
-                    if "429" in err_s or "RESOURCE_EXHAUSTED" in err_s or "404" in err_s:
+                    if "429" in err_s or "RESOURCE_EXHAUSTED" in err_s or "404" in err_s or "403" in err_s:
                         self.cooldowns[tag] = now + 300
                     last_err = f"{tag}: {e}"
         return None, last_err or "All Gemini keys/models are temporarily busy."
