@@ -176,3 +176,64 @@ class Moderation(commands.Cog):
     @app_commands.command(name="punishment", description="Open interactive punishment panel for a user")
     @app_commands.default_permissions(moderate_members=True)
     @app_commands.checks.has_permissions(moderate_members=True)
+    async def punishment(self, interaction: discord.Interaction, member: discord.Member):
+        embed = discord.Embed(title="🛡️ Punishment Control Panel", description=f"Target: **{member.mention}** (`{member.id}`)", color=discord.Color.red())
+        await interaction.response.send_message(embed=embed, view=PunishmentView(member))
+
+    @app_commands.command(name="manage", description="Open channel and server management panel")
+    @app_commands.default_permissions(manage_channels=True)
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def manage(self, interaction: discord.Interaction):
+        embed = discord.Embed(title="⚙️ Server & Channel Management", description="Select an action below.", color=discord.Color.blue())
+        await interaction.response.send_message(embed=embed, view=ManageView())
+
+    @app_commands.command(name="nuke", description="Clone and delete the current channel to wipe messages")
+    @app_commands.default_permissions(manage_channels=True)
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def nuke(self, interaction: discord.Interaction):
+        await interaction.response.send_message("💣 Nuking channel...", ephemeral=True)
+        ch = interaction.channel
+        new_ch = await ch.clone(reason=f"Nuked by {interaction.user}")
+        await new_ch.edit(position=ch.position)
+        await ch.delete(reason=f"Nuked by {interaction.user}")
+        await new_ch.send(f"💥 **Channel nuked!** Executed by {interaction.user.mention}.")
+
+    @app_commands.command(name="button", description="Access emergency server control buttons")
+    @app_commands.describe(choice="Choose emergency button: red, green, or black")
+    @app_commands.choices(choice=[
+        app_commands.Choice(name="Red Button (Nightmare Mode Lockdown)", value="red"),
+        app_commands.Choice(name="Green Button (Restore Normal Permissions)", value="green"),
+        app_commands.Choice(name="Black Button (Ultimate Nuclear Protocol)", value="black"),
+    ])
+    @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
+    async def button(self, interaction: discord.Interaction, choice: str):
+        guild = interaction.guild
+        if choice == "red":
+            await interaction.response.send_message("🚨 **NIGHTMARE MODE ACTIVATED!** Locking all channels...")
+            for ch in guild.channels:
+                try:
+                    ow = ch.overwrites_for(guild.default_role)
+                    ow.send_messages = ow.connect = ow.speak = False
+                    await ch.set_permissions(guild.default_role, overwrite=ow, reason=f"Red Button by {interaction.user}")
+                except Exception:
+                    pass
+            await interaction.followup.send("🔴 **Red Button pulled.** All standard channels locked down.")
+        elif choice == "green":
+            await interaction.response.send_message("🟢 **REVERTING NIGHTMARE MODE...** Restoring permissions...")
+            for ch in guild.channels:
+                try:
+                    ow = ch.overwrites_for(guild.default_role)
+                    ow.send_messages = ow.connect = ow.speak = None
+                    await ch.set_permissions(guild.default_role, overwrite=ow, reason=f"Green Button by {interaction.user}")
+                except Exception:
+                    pass
+            await interaction.followup.send("🟢 **Green Button pressed.** All channels restored!")
+        elif choice == "black":
+            code = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
+            embed = discord.Embed(title="🏴‍☠️ BLACK BUTTON - NUCLEAR PROTOCOL", description=f"**WARNING:** Deletes all roles and nukes all channels!\n\n🔐 **PASSCODE:** ```{code}```", color=discord.Color.dark_embed())
+            await interaction.response.send_message(embed=embed, view=BlackButtonView(code))
+
+
+async def setup(bot):
+    await bot.add_cog(Moderation(bot))
