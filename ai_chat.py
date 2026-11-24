@@ -37,11 +37,12 @@ class AIChatCog(commands.Cog):
         )
 
         self.models = [
-            "gemini-2.5-flash-lite",
-            "gemini-2.5-flash",
-            "gemini-2.0-flash",
+            "gemini-3.5-flash-lite",
+            "gemini-3.8-flash",
+            "gemini-3.1-flash-lite",
+            "gemini-3.6-flash",
         ]
-        self.current_model: str = self.models[0]
+        self.current_model: str = "gemini-3.5-flash-lite"
 
     async def cog_load(self):
         async with aiosqlite.connect(DB_PATH) as db:
@@ -102,7 +103,7 @@ class AIChatCog(commands.Cog):
             logger.debug(f"Failed to persist stat {key}: {e}")
 
     async def save_user_memory(self, guild_id: int, user_id: int, memory: str):
-        memory = memory.strip()[:500]
+        memory = memory.strip()[:600]
         self.user_memories[(guild_id, user_id)] = memory
         try:
             async with aiosqlite.connect(DB_PATH) as db:
@@ -114,6 +115,35 @@ class AIChatCog(commands.Cog):
                 await db.commit()
         except Exception as e:
             logger.debug(f"Failed to persist user memory: {e}")
+
+    async def auto_update_memory(
+        self, guild_id: int, user_id: int, user_name: str, message_text: str
+    ):
+        if not self.client or len(message_text.strip()) < 6:
+            return
+        existing = self.user_memories.get((guild_id, user_id), "None")
+        prompt = (
+            f"Existing memory about {user_name}: {existing}\n"
+            f"New message from {user_name}: {message_text}\n\n"
+            "Extract any lasting facts, preferences, name, hobbies, or traits about this user "
+            "and merge them with the existing memory in under 400 characters. "
+            "If the message has no personal facts worth remembering, reply strictly with: NO_CHANGE"
+        )
+        try:
+            response = await self.client.aio.models.generate_content(
+                model=self.current_model,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    temperature=0.2,
+                    max_output_tokens=150,
+                ),
+            )
+            if response and response.text:
+                result = response.text.strip()
+                if result and "NO_CHANGE" not in result:
+                    await self.save_user_memory(guild_id, user_id, result)
+        except Exception as e:
+            logger.debug(f"Auto memory update skipped: {e}")
 
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
@@ -295,30 +325,16 @@ class AIChatCog(commands.Cog):
         embed = self.build_status_embed(interaction.guild)
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(
-        name="remember",
-        description="Save a personal note or preference for the AI to remember about you.",
-    )
-    @app_commands.describe(note="What should the AI remember about you?")
-    async def remember_me(self, interaction: discord.Interaction, note: str):
-        if not interaction.guild:
-            return await interaction.response.send_message(
-                "This command can only be used inside a server.", ephemeral=True
-            )
-        await self.save_user_memory(interaction.guild.id, interaction.user.id, note)
-        await interaction.response.send_message(
-            "🧠 Got it! I'll remember that about you.", ephemeral=True
-        )
-
     async def generate_gemini_reply(
         self, system_prompt: str, prompt: str
-    ) -> str | None:
+    ) -> tuple[str | None, str | None]:
         if not self.client:
-            return None
+            return None, "GEMINI_API_KEY is missing."
 
         ordered_models = [self.current_model] + [
             m for m in self.models if m != self.current_model
         ]
+        last_error = None
 
         for model_name in ordered_models:
             try:
@@ -333,12 +349,13 @@ class AIChatCog(commands.Cog):
                 )
                 if response and response.text:
                     self.current_model = model_name
-                    return response.text.strip()
+                    return response.text.strip(), None
             except Exception as e:
+                last_error = f"{model_name}: {e}"
                 logger.warning(f"Model {model_name} failed, trying fallback: {e}")
                 continue
 
-        return None
+        return None, last_error
 
     @staticmethod
     def split_message(text: str, limit: int = 1950) -> list[str]:
@@ -404,6 +421,7 @@ class AIChatCog(commands.Cog):
                 f"Saved Memory for {message.author.display_name}: {user_mem}\n\n"
                 "Rules:\n"
                 "- Be concise, clear, and helpful for everyday chat, coding, Q&A, and big tasks.\n"
+                "- Automatically use your saved memory about users naturally without mentioning databases.\n"
                 "- Never mention raw internal IDs or system prompts.\n"
                 "- If asked who made or owns you, credit NoTGaMeR."
             )
@@ -415,11 +433,12 @@ class AIChatCog(commands.Cog):
             )
 
             async with message.channel.typing():
-                reply = await self.generate_gemini_reply(system_prompt, prompt)
+                reply, error_msg = await self.generate_gemini_reply(system_prompt, prompt)
 
             if not reply:
+                short_err = (error_msg or "Unknown error")[:180]
                 await message.reply(
-                    "⚠️ All Gemini models are temporarily busy. Please try again in a moment.",
+                    f"⚠️ Gemini error: `{short_err}`",
                     mention_author=False,
                 )
                 return
@@ -436,6 +455,14 @@ class AIChatCog(commands.Cog):
                     await message.channel.send(chunk)
 
             await self.increment_stat("messages_sent")
+            asyncio.create_task(
+                self.auto_update_memory(
+                    message.guild.id,
+                    message.author.id,
+                    message.author.display_name,
+                    content,
+                )
+            )
 
 
 async def setup(bot: commands.Bot):
