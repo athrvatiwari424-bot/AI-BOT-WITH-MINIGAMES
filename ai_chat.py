@@ -215,7 +215,7 @@ class AIChatCog(commands.Cog):
         embed.add_field(name="⏳ Timeouts Done", value=f"`{self.stats.get('timeouts', 0):,}`", inline=True)
         embed.add_field(name="🔨 Bans Done", value=f"`{self.stats.get('bans', 0):,}`", inline=True)
         await interaction.response.send_message(embed=embed)
-    async def call_openai_compatible(self, url: str, api_key: str, model: str, system_prompt: str, prompt: str) -> str | None:
+     async def call_openai_compatible(self, url: str, api_key: str, model: str, system_prompt: str, prompt: str) -> str | None:
         session = await self.get_session()
         headers = {"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json", "Accept": "application/json"}
         if "github" in url:
@@ -226,7 +226,8 @@ class AIChatCog(commands.Cog):
                 data = await resp.json()
                 first = next(iter(data.get("choices") or []), None)
                 return first["message"]["content"].strip() if first else None
-            raise RuntimeError(f"HTTP {resp.status}")
+            err_txt = await resp.text()
+            raise RuntimeError(f"HTTP {resp.status}: {err_txt[:80]}")
 
     async def generate_ai_reply(self, system_prompt: str, prompt: str, fast_only: bool = False) -> tuple[str | None, str | None]:
         now = time.monotonic()
@@ -248,12 +249,13 @@ class AIChatCog(commands.Cog):
                         self.cooldowns[tag] = now + 300
                     last_err = f"{tag}: {e}"
         gh_key = self.get_key("GITHUB_TOKEN")
+        gh_url = "https://" + "models.github.ai/inference/chat/completions"
         fallbacks = [
-            ("GitHub Models (gpt-4o-mini)", "https://github.ai", gh_key, "openai/gpt-4o-mini"),
-            ("GitHub Models (Llama-3.3-70B)", "https://github.ai", gh_key, "meta/Llama-3.3-70B-Instruct"),
-            ("Cerebras (llama3.1-8b)", "https://cerebras.ai", self.get_key("CEREBRAS_API_KEY"), "llama3.1-8b"),
-            ("Groq (llama-3.1-8b)", "https://groq.com", self.get_key("GROQ_API_KEY"), "llama-3.1-8b-instant"),
-            ("Mistral (mistral-small)", "https://mistral.ai", self.get_key("MISTRAL_API_KEY"), "mistral-small-latest"),
+            ("GitHub Models (gpt-4o-mini)", gh_url, gh_key, "openai/gpt-4o-mini"),
+            ("GitHub Models (Llama-3.3-70B)", gh_url, gh_key, "meta/Llama-3.3-70B-Instruct"),
+            ("Cerebras (llama3.1-8b)", "https://" + "api.cerebras.ai/v1/chat/completions", self.get_key("CEREBRAS_API_KEY"), "llama3.1-8b"),
+            ("Groq (llama-3.1-8b)", "https://" + "://groq.com", self.get_key("GROQ_API_KEY"), "llama-3.1-8b-instant"),
+            ("Mistral (mistral-small)", "https://" + "api.mistral.ai/v1/chat/completions", self.get_key("MISTRAL_API_KEY"), "mistral-small-latest"),
         ]
         for label, url, key, model in fallbacks:
             if not key or self.cooldowns.get(label, 0) > now:
@@ -267,6 +269,7 @@ class AIChatCog(commands.Cog):
                 self.cooldowns[label] = now + 120
                 last_err = f"{label}: {e}"
         return None, last_err or "All AI providers busy—try again in a moment."
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not self.bot.user or not self.has_any_ai():
