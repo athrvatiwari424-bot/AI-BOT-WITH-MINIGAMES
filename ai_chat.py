@@ -20,10 +20,9 @@ class AIChatCog(commands.Cog):
         self.stats = {"messages_sent": 0, "timeouts": 0, "bans": 0}
         self.cooldowns: dict[str, float] = {}
         self.http_session: aiohttp.ClientSession | None = None
-
         gemini_keys = [k.strip() for k in (os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_2"), os.getenv("GEMINI_API_KEY_3")) if k and k.strip()]
         self.gemini_clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in gemini_keys]
-        self.gemini_models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-3.5-flash-lite", "gemini-3.1-flash-lite"]
+        self.gemini_models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
         self.active_provider = "Ready (Multi-AI)"
 
     def get_key(self, *names: str) -> str:
@@ -34,7 +33,7 @@ class AIChatCog(commands.Cog):
         return ""
 
     def has_any_ai(self) -> bool:
-        return bool(self.gemini_clients or self.get_key("OPENROUTER_API_KEY", "Open router") or self.get_key("GITHUB_TOKEN") or self.get_key("GROQ_API_KEY") or self.get_key("CEREBRAS_API_KEY") or self.get_key("MISTRAL_API_KEY"))
+        return bool(self.gemini_clients or self.get_key("GITHUB_TOKEN") or self.get_key("OPENROUTER_API_KEY", "Open router") or self.get_key("GROQ_API_KEY") or self.get_key("CEREBRAS_API_KEY") or self.get_key("MISTRAL_API_KEY"))
 
     async def get_session(self) -> aiohttp.ClientSession:
         if self.http_session is None or self.http_session.closed:
@@ -44,7 +43,6 @@ class AIChatCog(commands.Cog):
     async def cog_unload(self):
         if self.http_session and not self.http_session.closed:
             await self.http_session.close()
-
     async def cog_load(self):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("CREATE TABLE IF NOT EXISTS ai_chat_channels (guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL)")
@@ -62,6 +60,7 @@ class AIChatCog(commands.Cog):
                 for k, v in await c.fetchall():
                     if k in self.stats:
                         self.stats[k] = v
+
     async def increment_stat(self, key: str, amount: int = 1):
         self.stats[key] = self.stats.get(key, 0) + amount
         try:
@@ -86,7 +85,6 @@ class AIChatCog(commands.Cog):
                     await db.commit()
         except Exception:
             pass
-
     @staticmethod
     def is_restricted_request(text: str) -> bool:
         low = text.lower()
@@ -226,8 +224,7 @@ class AIChatCog(commands.Cog):
         async with session.post(url, headers=headers, json=payload) as resp:
             if resp.status == 200 and "application/json" in (resp.headers.get("Content-Type") or ""):
                 data = await resp.json()
-                choices = data.get("choices") or []
-                first = choices.pop(0) if choices else None
+                first = next(iter(data.get("choices") or []), None)
                 return first["message"]["content"].strip() if first else None
             err_txt = await resp.text()
             raise RuntimeError(f"HTTP {resp.status}: {err_txt[:80]}")
@@ -247,9 +244,9 @@ class AIChatCog(commands.Cog):
                         self.active_provider = f"Gemini Key#{idx + 1} ({model_name})"
                         return res.text.strip(), None
                 except Exception as e:
-                    self.cooldowns[tag] = now + 90
+                    self.cooldowns[tag] = now + 300
                     last_err = f"{tag}: {e}"
-                    logger.warning(f"{tag} cooled down 90s: {e}")
+                    logger.warning(f"{tag} cooled down 5m: {e}")
 
         gh_key = self.get_key("GITHUB_TOKEN")
         or_key = self.get_key("OPENROUTER_API_KEY", "Open router")
@@ -272,7 +269,7 @@ class AIChatCog(commands.Cog):
                     self.active_provider = label
                     return text, None
             except Exception as e:
-                self.cooldowns[label] = now + 90
+                self.cooldowns[label] = now + 300
                 last_err = f"{label}: {e}"
                 logger.warning(last_err)
         if not fast_only:
