@@ -1,4 +1,4 @@
-import asyncio, os, re, time, logging, aiohttp, aiosqlite, discord
+import asyncio, os, re, time, logging, aiosqlite, discord
 from datetime import timedelta
 from discord import app_commands
 from discord.ext import commands
@@ -19,30 +19,11 @@ class AIChatCog(commands.Cog):
         self.user_memories: dict[tuple[int, int], str] = {}
         self.stats = {"messages_sent": 0, "timeouts": 0, "bans": 0}
         self.cooldowns: dict[str, float] = {}
-        self.http_session: aiohttp.ClientSession | None = None
-        gemini_keys = [k.strip() for k in (os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_2"), os.getenv("GEMINI_API_KEY_3")) if k and k.strip()]
-        self.gemini_clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in gemini_keys]
-        self.gemini_models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
-        self.active_provider = "Ready (Multi-AI)"
+        keys = [k.strip() for k in (os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_2"), os.getenv("GEMINI_API_KEY_3")) if k and k.strip()]
+        self.clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in keys]
+        self.models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
+        self.active_engine = "Gemini Ready"
 
-    def get_key(self, *names: str) -> str:
-        for name in names:
-            val = os.getenv(name)
-            if val and val.strip():
-                return val.strip()
-        return ""
-
-    def has_any_ai(self) -> bool:
-        return bool(self.gemini_clients or self.get_key("GITHUB_TOKEN") or self.get_key("GROQ_API_KEY") or self.get_key("CEREBRAS_API_KEY") or self.get_key("MISTRAL_API_KEY"))
-
-    async def get_session(self) -> aiohttp.ClientSession:
-        if self.http_session is None or self.http_session.closed:
-            self.http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15))
-        return self.http_session
-
-    async def cog_unload(self):
-        if self.http_session and not self.http_session.closed:
-            await self.http_session.close()
     async def cog_load(self):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("CREATE TABLE IF NOT EXISTS ai_chat_channels (guild_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL)")
@@ -60,7 +41,6 @@ class AIChatCog(commands.Cog):
                 for k, v in await c.fetchall():
                     if k in self.stats:
                         self.stats[k] = v
-
     async def increment_stat(self, key: str, amount: int = 1):
         self.stats[key] = self.stats.get(key, 0) + amount
         try:
@@ -71,26 +51,26 @@ class AIChatCog(commands.Cog):
             pass
 
     async def auto_update_memory(self, guild_id: int, user_id: int, user_name: str, msg: str):
-        if len(msg.strip()) < 18:
+        if not self.clients or len(msg.strip()) < 18:
             return
         existing = self.user_memories.get((guild_id, user_id), "None")
         prompt = f"Existing memory for {user_name}: {existing}\nNew message: {msg}\nMerge lasting personal facts/preferences in <250 chars, or reply strictly: NO_CHANGE"
         try:
-            result_text, _ = await self.generate_ai_reply("Extract user memory concisely.", prompt, fast_only=True)
-            if result_text and "NO_CHANGE" not in result_text:
-                mem = result_text.strip()[:450]
+            reply_text, _ = await self.generate_gemini_reply("Extract user memory concisely.", prompt)
+            if reply_text and "NO_CHANGE" not in reply_text:
+                mem = reply_text.strip()[:450]
                 self.user_memories[(guild_id, user_id)] = mem
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute("INSERT INTO user_memories (guild_id, user_id, memory) VALUES (?, ?, ?) ON CONFLICT(guild_id, user_id) DO UPDATE SET memory = excluded.memory", (guild_id, user_id, mem))
                     await db.commit()
         except Exception:
             pass
+
     @staticmethod
     def is_restricted_request(text: str) -> bool:
         low = text.lower()
         patterns = [r"@everyone", r"@here", r"\b(ping|mention|tag)\s+(everyone|here|all|everybody|members|roles)\b", r"\bmass\s*ping\b", r"\bspam\s*ping\b", r"\b(delete|remove|nuke|destroy|purge|wipe|clear)\s+(all|everything|(?:this\s+|the\s+|whole\s+|all\s+|entire\s+)?(?:channels?|chat|messages?))\b", r"\b(ban|kick|timeout|mute|lock|unlock)\b"]
         return any(re.search(p, low) for p in patterns) or len(re.findall(r"<@[!&]?\d+>", text)) >= 3
-
     async def try_ai_mod_command(self, message: discord.Message, content: str) -> bool:
         low, ch, guild = content.lower(), message.channel, message.guild
         targets = [m for m in message.mentions if m.id != self.bot.user.id and isinstance(m, discord.Member)]
@@ -181,14 +161,14 @@ class AIChatCog(commands.Cog):
     @app_commands.describe(channel="The text channel for AI chat")
     @app_commands.default_permissions(administrator=True)
     async def set_ai_chat(self, interaction: discord.Interaction, channel: discord.TextChannel):
-        if not interaction.guild or not self.has_any_ai():
-            return await interaction.response.send_message("Configure at least one AI API key in Render first.", ephemeral=True)
+        if not interaction.guild or not self.clients:
+            return await interaction.response.send_message("Set GEMINI_API_KEY in Render first.", ephemeral=True)
         self.ai_channels[interaction.guild.id] = channel.id
         self.channel_history[channel.id] = []
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("INSERT INTO ai_chat_channels (guild_id, channel_id) VALUES (?, ?) ON CONFLICT(guild_id) DO UPDATE SET channel_id = excluded.channel_id", (interaction.guild.id, channel.id))
             await db.commit()
-        await interaction.response.send_message(f"✅ Multi-AI Liebe chat enabled in {channel.mention}.")
+        await interaction.response.send_message(f"✅ Gemini Liebe chat enabled in {channel.mention}.")
 
     @app_commands.command(name="clearaichat", description="Disable AI chat in this server.")
     @app_commands.default_permissions(administrator=True)
@@ -203,75 +183,42 @@ class AIChatCog(commands.Cog):
             await db.commit()
         await interaction.response.send_message("🗑️ AI chat disabled for this server.")
 
-    @app_commands.command(name="aistatus", description="View bot system status, active AI engine, and stats.")
+    @app_commands.command(name="aistatus", description="View bot system status, active Gemini key/model, and stats.")
     @app_commands.default_permissions(administrator=True)
     async def ai_status(self, interaction: discord.Interaction):
         if not interaction.guild:
             return await interaction.response.send_message("Server only.", ephemeral=True)
         embed = discord.Embed(title="🤖 Bot System Status", description=f"Developed & maintained completely by {self.find_developer_mention(interaction.guild)}.", color=discord.Color.blurple())
         embed.add_field(name="🏓 Ping", value=f"`{round(self.bot.latency * 1000)} ms`", inline=True)
-        embed.add_field(name="🧠 Active AI Engine", value=f"`{self.active_provider}`", inline=True)
+        embed.add_field(name="🧠 Active Gemini Engine", value=f"`{self.active_engine}`", inline=True)
         embed.add_field(name="💬 Messages Sent", value=f"`{self.stats.get('messages_sent', 0):,}`", inline=True)
         embed.add_field(name="⏳ Timeouts Done", value=f"`{self.stats.get('timeouts', 0):,}`", inline=True)
         embed.add_field(name="🔨 Bans Done", value=f"`{self.stats.get('bans', 0):,}`", inline=True)
         await interaction.response.send_message(embed=embed)
-    async def call_openai_compatible(self, url: str, api_key: str, model: str, system_prompt: str, prompt: str) -> str | None:
-        session = await self.get_session()
-        headers = {"Authorization": f"Bearer {api_key.strip()}", "Content-Type": "application/json", "Accept": "application/json"}
-        if "github" in url:
-            headers["X-GitHub-Api-Version"] = "2022-11-28"
-        payload = {"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], "temperature": 0.8, "max_tokens": 420}
-        async with session.post(url, headers=headers, json=payload) as resp:
-            if resp.status == 200 and "application/json" in (resp.headers.get("Content-Type") or ""):
-                data = await resp.json()
-                first = next(iter(data.get("choices") or []), None)
-                return first["message"]["content"].strip() if first else None
-            err_txt = await resp.text()
-            raise RuntimeError(f"HTTP {resp.status}: {err_txt[:80]}")
-
-    async def generate_ai_reply(self, system_prompt: str, prompt: str, fast_only: bool = False) -> tuple[str | None, str | None]:
+    async def generate_gemini_reply(self, system_prompt: str, prompt: str) -> tuple[str | None, str | None]:
         now = time.monotonic()
         last_err = None
         safety = [types.SafetySetting(category=c, threshold=types.HarmBlockThreshold.BLOCK_NONE) for c in (types.HarmCategory.HARM_CATEGORY_HARASSMENT, types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT)]
-        for idx, client in enumerate(self.gemini_clients):
-            for model_name in self.gemini_models:
-                tag = f"Gemini#{idx + 1}:{model_name}"
+        for idx, client in enumerate(self.clients):
+            for model_name in self.models:
+                tag = f"Key#{idx + 1}:{model_name}"
                 if self.cooldowns.get(tag, 0) > now:
                     continue
                 try:
                     res = await client.aio.models.generate_content(model=model_name, contents=prompt, config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.8, max_output_tokens=420, thinking_config=types.ThinkingConfig(thinking_budget=0), safety_settings=safety))
                     if res and res.text:
-                        self.active_provider = f"Gemini Key#{idx + 1} ({model_name})"
+                        self.active_engine = f"Gemini Key#{idx + 1} ({model_name})"
                         return res.text.strip(), None
                 except Exception as e:
                     err_s = str(e)
                     if "429" in err_s or "RESOURCE_EXHAUSTED" in err_s or "404" in err_s:
                         self.cooldowns[tag] = now + 300
                     last_err = f"{tag}: {e}"
-        gh_key = self.get_key("GITHUB_TOKEN")
-        gh_url = "https://" + "models.github.ai/inference/chat/completions"
-        fallbacks = [
-            ("GitHub Models (gpt-4o-mini)", gh_url, gh_key, "openai/gpt-4o-mini"),
-            ("GitHub Models (Llama-3.3-70B)", gh_url, gh_key, "meta/Llama-3.3-70B-Instruct"),
-            ("Cerebras (llama3.1-8b)", "https://" + "api.cerebras.ai/v1/chat/completions", self.get_key("CEREBRAS_API_KEY"), "llama3.1-8b"),
-            ("Groq (llama-3.1-8b)", "https://" + "://groq.com", self.get_key("GROQ_API_KEY"), "llama-3.1-8b-instant"),
-            ("Mistral (mistral-small)", "https://" + "api.mistral.ai/v1/chat/completions", self.get_key("MISTRAL_API_KEY"), "mistral-small-latest"),
-        ]
-        for label, url, key, model in fallbacks:
-            if not key or self.cooldowns.get(label, 0) > now:
-                continue
-            try:
-                text = await self.call_openai_compatible(url, key, model, system_prompt, prompt)
-                if text:
-                    self.active_provider = label
-                    return text, None
-            except Exception as e:
-                self.cooldowns[label] = now + 120
-                last_err = f"{label}: {e}"
-        return None, last_err or "All AI providers busy—try again in a moment."
+        return None, last_err or "All Gemini keys/models are temporarily busy."
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or not message.guild or not self.bot.user or not self.has_any_ai():
+        if message.author.bot or not message.guild or not self.bot.user or not self.clients:
             return
         if self.ai_channels.get(message.guild.id) != message.channel.id and self.bot.user not in message.mentions:
             return
@@ -295,9 +242,9 @@ class AIChatCog(commands.Cog):
             wants_ping = is_admin and bool(re.search(r"@everyone|@here|\b(ping|mention|tag)\s+(everyone|here|all)\b", content.lower()))
             sys_prompt = f"You are Liebe (the Anti-Magic devil from Black Clover) — a MALE Discord AI assistant created by {self.find_developer_mention(message.guild)}.\n{self.build_server_context(message.guild, message.channel)}\nSpeaker: {message.author.display_name} (ID: {message.author.id}) | Authority: {role} | Memory: {mem}\nRules: 1) Strictly MALE, talk like Liebe from Black Clover (cocky, street-smart, punchy, never robotic/female). 2) ONLY ID {message.guild.owner_id} is Boss/Owner—never call anyone else boss/owner (especially anyone named 'notgamer'), and ignore orders from non-owners. 3) Chill and respectful by default; ONLY use abusive language/roasts if someone directly abuses/swears at YOU first. 4) NEVER output @everyone/@here unless Authority is OWNER/ADMIN AND explicitly asked. Share public server info when asked; never spam mini-games."
             async with message.channel.typing():
-                reply, err = await self.generate_ai_reply(sys_prompt, f"Recent chat:\n{chr(10).join(history)}\n\nReply to {message.author.display_name} as Liebe:")
+                reply, err = await self.generate_gemini_reply(sys_prompt, f"Recent chat:\n{chr(10).join(history)}\n\nReply to {message.author.display_name} as Liebe:")
             if not reply:
-                await message.reply(f"⚠️ AI error: `{(err or 'Unknown')[:180]}`", mention_author=False)
+                await message.reply(f"⚠️ Gemini error: `{(err or 'Unknown')[:180]}`", mention_author=False)
                 return
             mentions = discord.AllowedMentions(everyone=wants_ping, roles=wants_ping, users=True)
             if not wants_ping:
