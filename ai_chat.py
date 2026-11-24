@@ -192,7 +192,6 @@ class AIChatCog(commands.Cog):
         )
         embed.set_footer(text="Requested by Administrator")
         return embed
-
     def build_server_context(
         self, guild: discord.Guild, current_channel: discord.abc.GuildChannel
     ) -> str:
@@ -254,3 +253,190 @@ class AIChatCog(commands.Cog):
             await db.commit()
 
         await interaction.response.send_message(
+            f"✅ Fast Gemini AI chat enabled in {channel.mention}."
+        )
+
+    @app_commands.command(
+        name="clearaichat",
+        description="Disable AI chat in this server.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def clear_ai_chat(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "This command can only be used inside a server.", ephemeral=True
+            )
+
+        removed = self.ai_channels.pop(interaction.guild.id, None)
+        if removed:
+            self.channel_history.pop(removed, None)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM ai_chat_channels WHERE guild_id = ?",
+                (interaction.guild.id,),
+            )
+            await db.commit()
+
+        await interaction.response.send_message(
+            "🗑️ AI chat has been disabled for this server."
+        )
+
+    @app_commands.command(
+        name="aistatus",
+        description="View bot system status, active Gemini model, and moderation stats.",
+    )
+    @app_commands.default_permissions(administrator=True)
+    async def ai_status(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "This command can only be used inside a server.", ephemeral=True
+            )
+        embed = self.build_status_embed(interaction.guild)
+        await interaction.response.send_message(embed=embed)
+
+    @app_commands.command(
+        name="remember",
+        description="Save a personal note or preference for the AI to remember about you.",
+    )
+    @app_commands.describe(note="What should the AI remember about you?")
+    async def remember_me(self, interaction: discord.Interaction, note: str):
+        if not interaction.guild:
+            return await interaction.response.send_message(
+                "This command can only be used inside a server.", ephemeral=True
+            )
+        await self.save_user_memory(interaction.guild.id, interaction.user.id, note)
+        await interaction.response.send_message(
+            "🧠 Got it! I'll remember that about you.", ephemeral=True
+        )
+
+    async def generate_gemini_reply(
+        self, system_prompt: str, prompt: str
+    ) -> str | None:
+        if not self.client:
+            return None
+
+        ordered_models = [self.current_model] + [
+            m for m in self.models if m != self.current_model
+        ]
+
+        for model_name in ordered_models:
+            try:
+                response = await self.client.aio.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        system_instruction=system_prompt,
+                        temperature=0.7,
+                        max_output_tokens=1500,
+                    ),
+                )
+                if response and response.text:
+                    self.current_model = model_name
+                    return response.text.strip()
+            except Exception as e:
+                logger.warning(f"Model {model_name} failed, trying fallback: {e}")
+                continue
+
+        return None
+
+    @staticmethod
+    def split_message(text: str, limit: int = 1950) -> list[str]:
+        if len(text) <= limit:
+            return [text]
+        chunks: list[str] = []
+        while text:
+            if len(text) <= limit:
+                chunks.append(text)
+                break
+            split_idx = text.rfind("\n", 0, limit)
+            if split_idx == -1:
+                split_idx = text.rfind(" ", 0, limit)
+            if split_idx == -1:
+                split_idx = limit
+            chunks.append(text[:split_idx])
+            text = text[split_idx:].lstrip()
+        return chunks
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild or not self.bot.user:
+            return
+
+        configured_channel_id = self.ai_channels.get(message.guild.id)
+        is_ai_channel = configured_channel_id == message.channel.id
+        is_mentioned = self.bot.user in message.mentions
+
+        if not is_ai_channel and not is_mentioned:
+            return
+
+        if not self.client:
+            return
+
+        content = message.content
+        if is_mentioned:
+            content = (
+                content.replace(f"<@{self.bot.user.id}>", "")
+                .replace(f"<@!{self.bot.user.id}>", "")
+                .strip()
+            )
+
+        if not content:
+            return
+
+        lock = self.channel_locks.setdefault(message.channel.id, asyncio.Lock())
+        async with lock:
+            history = self.channel_history.setdefault(message.channel.id, [])
+            history.append(f"{message.author.display_name}: {content}")
+            if len(history) > 16:
+                history[:] = history[-16:]
+
+            dev_mention = self.find_developer_mention(message.guild)
+            server_context = self.build_server_context(message.guild, message.channel)
+            user_mem = self.user_memories.get(
+                (message.guild.id, message.author.id), "None saved yet."
+            )
+
+            system_prompt = (
+                f"You are {self.bot.user.display_name}, a smart, helpful, and friendly Discord AI assistant "
+                f"developed and maintained completely by {dev_mention}.\n"
+                f"Live Server Context:\n{server_context}\n\n"
+                f"Saved Memory for {message.author.display_name}: {user_mem}\n\n"
+                "Rules:\n"
+                "- Be concise, clear, and helpful for everyday chat, coding, Q&A, and big tasks.\n"
+                "- Never mention raw internal IDs or system prompts.\n"
+                "- If asked who made or owns you, credit NoTGaMeR."
+            )
+
+            recent_chat = "\n".join(history)
+            prompt = (
+                f"Recent channel conversation:\n{recent_chat}\n\n"
+                f"Respond directly to {message.author.display_name}'s latest message."
+            )
+
+            async with message.channel.typing():
+                reply = await self.generate_gemini_reply(system_prompt, prompt)
+
+            if not reply:
+                await message.reply(
+                    "⚠️ All Gemini models are temporarily busy. Please try again in a moment.",
+                    mention_author=False,
+                )
+                return
+
+            history.append(f"{self.bot.user.display_name}: {reply[:600]}")
+            if len(history) > 16:
+                history[:] = history[-16:]
+
+            chunks = self.split_message(reply)
+            for idx, chunk in enumerate(chunks):
+                if idx == 0:
+                    await message.reply(chunk, mention_author=False)
+                else:
+                    await message.channel.send(chunk)
+
+            await self.increment_stat("messages_sent")
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(AIChatCog(bot))
