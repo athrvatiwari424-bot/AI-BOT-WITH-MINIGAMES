@@ -18,7 +18,6 @@ class AIChatCog(commands.Cog):
         self.channel_locks: dict[int, asyncio.Lock] = {}
         self.user_memories: dict[tuple[int, int], str] = {}
         self.stats = {"messages_sent": 0, "timeouts": 0, "bans": 0}
-
         gemini_keys = [k for k in (os.getenv("GEMINI_API_KEY"), os.getenv("GEMINI_API_KEY_2"), os.getenv("GEMINI_API_KEY_3")) if k]
         self.gemini_clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=25000)) for k in gemini_keys]
         self.gemini_models = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-3.6-flash"]
@@ -44,7 +43,6 @@ class AIChatCog(commands.Cog):
                 for k, v in await c.fetchall():
                     if k in self.stats:
                         self.stats[k] = v
-
     async def increment_stat(self, key: str, amount: int = 1):
         self.stats[key] = self.stats.get(key, 0) + amount
         try:
@@ -74,6 +72,7 @@ class AIChatCog(commands.Cog):
                     await db.commit()
         except Exception:
             pass
+
     @staticmethod
     def is_restricted_request(text: str) -> bool:
         low = text.lower()
@@ -130,7 +129,6 @@ class AIChatCog(commands.Cog):
             await message.reply(f"❌ Mod action failed: `{e}`", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
             return True
         return False
-
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         if before.timed_out_until == after.timed_out_until or after.timed_out_until is None or not self.bot.user or not after.guild.me.guild_permissions.view_audit_log:
@@ -156,6 +154,7 @@ class AIChatCog(commands.Cog):
                     break
         except Exception:
             pass
+
     def find_developer_mention(self, guild: discord.Guild) -> str:
         m = guild.get_member(BOT_OWNER_ID)
         return f"{m.mention} (**NoTGaMeR**)" if m else f"<@{BOT_OWNER_ID}> (**NoTGaMeR**)"
@@ -204,9 +203,8 @@ class AIChatCog(commands.Cog):
         embed.add_field(name="⏳ Timeouts Done", value=f"`{self.stats.get('timeouts', 0):,}`", inline=True)
         embed.add_field(name="🔨 Bans Done", value=f"`{self.stats.get('bans', 0):,}`", inline=True)
         await interaction.response.send_message(embed=embed)
-
-        async def call_openai_compatible(self, url: str, api_key: str, model: str, system_prompt: str, prompt: str) -> str | None:
-        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "HTTP-Referer": "https://bot-nottybot.onrender.com", "X-Title": "Liebe Discord Bot"}
+    async def call_openai_compatible(self, url: str, api_key: str, model: str, system_prompt: str, prompt: str) -> str | None:
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "HTTP-Referer": "https://onrender.com", "X-Title": "Liebe Discord Bot"}
         payload = {"model": model, "messages": [{"role": "system", "content": system_prompt}, {"role": "user", "content": prompt}], "temperature": 0.8, "max_tokens": 700}
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=25)) as session:
             async with session.post(url, headers=headers, json=payload) as resp:
@@ -228,20 +226,17 @@ class AIChatCog(commands.Cog):
                 except Exception as e:
                     logger.warning(f"Gemini Key#{idx + 1} {model_name} failed: {e}")
 
-        fallbacks = []
-        if os.getenv("OPENROUTER_API_KEY"):
-            fallbacks.append(("OpenRouter (free-auto)", "https://openrouter.ai", os.getenv("OPENROUTER_API_KEY"), "openrouter/free"))
-        if os.getenv("GROQ_API_KEY"):
-            fallbacks.append(("Groq (llama-3.3-70b)", "https://groq.com", os.getenv("GROQ_API_KEY"), "llama-3.3-70b-versatile"))
-        if os.getenv("CEREBRAS_API_KEY"):
-            fallbacks.append(("Cerebras (llama3.1-8b)", "https://cerebras.ai", os.getenv("CEREBRAS_API_KEY"), "llama3.1-8b"))
-        if os.getenv("GITHUB_TOKEN"):
-            fallbacks.append(("GitHub Models (gpt-4o-mini)", "https://azure.com", os.getenv("GITHUB_TOKEN"), "gpt-4o-mini"))
-        if os.getenv("MISTRAL_API_KEY"):
-            fallbacks.append(("Mistral (mistral-small)", "https://mistral.ai", os.getenv("MISTRAL_API_KEY"), "mistral-small-latest"))
-
+        fallbacks = [
+            ("OpenRouter (free-auto)", "https://openrouter.ai", os.getenv("OPENROUTER_API_KEY"), "openrouter/free"),
+            ("Groq (llama-3.3-70b)", "https://groq.com", os.getenv("GROQ_API_KEY"), "llama-3.3-70b-versatile"),
+            ("Cerebras (llama3.1-8b)", "https://cerebras.ai", os.getenv("CEREBRAS_API_KEY"), "llama3.1-8b"),
+            ("GitHub Models (gpt-4o-mini)", "https://azure.com", os.getenv("GITHUB_TOKEN"), "gpt-4o-mini"),
+            ("Mistral (mistral-small)", "https://mistral.ai", os.getenv("MISTRAL_API_KEY"), "mistral-small-latest"),
+        ]
         last_err = "No AI keys configured."
         for label, url, key, model in fallbacks:
+            if not key:
+                continue
             try:
                 text = await self.call_openai_compatible(url, key, model, system_prompt, prompt)
                 if text:
@@ -250,7 +245,6 @@ class AIChatCog(commands.Cog):
             except Exception as e:
                 last_err = f"{label}: {e}"
                 logger.warning(last_err)
-
         return None, last_err
 
     @commands.Cog.listener()
