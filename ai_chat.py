@@ -296,3 +296,5 @@ class AIChatCog(commands.Cog):
                 chunk = reply[i:i + 1950]
                 await (message.reply(chunk, mention_author=False, allowed_mentions=mentions) if i == 0 else message.channel.send(chunk, allowed_mentions=mentions))
             await self.increment_stat("messages_sent")
+async def setup(bot: commands.Bot):
+    await bot.add_cog(AIChatCog(bot))
