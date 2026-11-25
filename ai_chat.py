@@ -22,7 +22,8 @@ class AIChatCog(commands.Cog):
         self.memory_cooldowns: dict[tuple[int, int], float] = {}
         raw_keys = [os.getenv(n) for n in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3")]
         keys = list(dict.fromkeys(k.strip() for k in raw_keys if k and k.strip()))
-        self.clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=9000)) for k in keys]
+        # The GenAI client rejects manually configured deadlines shorter than 10 seconds.
+        self.clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in keys]
         self.models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
         self.active_engine = "Gemini Ready"
 
@@ -224,7 +225,14 @@ class AIChatCog(commands.Cog):
                 if self.cooldowns.get(tag, 0) > time.monotonic():
                     continue
                 try:
-                    response = await asyncio.wait_for(client.aio.models.generate_content(model=model_name, contents=prompt, config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.8, max_output_tokens=420, safety_settings=safety)), timeout=9.0)
+                    response = await asyncio.wait_for(
+                        client.aio.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.8, max_output_tokens=420, safety_settings=safety),
+                        ),
+                        timeout=15.0,
+                    )
                     if response and response.text and response.text.strip():
                         self.active_engine = f"Gemini Key#{index + 1} ({model_name})"
                         return response.text.strip(), None
@@ -238,10 +246,13 @@ class AIChatCog(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not self.bot.user or not self.clients:
             return
-        bot_mentioned = self.bot.user in message.mentions or bool(re.search(rf"<@!?{self.bot.user.id}>", message.content))
+        # Compare user IDs rather than relying on Discord.py object identity; regex
+        # also covers raw mention markup when the mentions cache is unavailable.
+        mention_pattern = rf"<@!?{self.bot.user.id}>"
+        bot_mentioned = any(user.id == self.bot.user.id for user in message.mentions) or bool(re.search(mention_pattern, message.content))
         if self.ai_channels.get(message.guild.id) != message.channel.id and not bot_mentioned:
             return
-        content = re.sub(rf"<@!?{self.bot.user.id}>", "", message.content).strip()
+        content = re.sub(mention_pattern, "", message.content).strip()
         if not content:
             return
 
