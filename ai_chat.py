@@ -19,6 +19,7 @@ class AIChatCog(commands.Cog):
         self.user_memories: dict[tuple[int, int], str] = {}
         self.stats = {"messages_sent": 0, "timeouts": 0, "bans": 0}
         self.cooldowns: dict[str, float] = {}
+        self.memory_cooldowns: dict[tuple[int, int], float] = {}
         raw_keys = [os.getenv(n) for n in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3")]
         keys = list(dict.fromkeys(k.strip() for k in raw_keys if k and k.strip()))
         self.clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=7000)) for k in keys]
@@ -55,18 +56,26 @@ class AIChatCog(commands.Cog):
     async def auto_update_memory(self, guild_id: int, user_id: int, user_name: str, msg: str):
         if not self.clients or len(msg.strip()) < 35:
             return
-        existing = self.user_memories.get((guild_id, user_id), "None")
+        memory_key = (guild_id, user_id)
+        now = time.monotonic()
+        if self.memory_cooldowns.get(memory_key, 0) > now:
+            return
+        # Limit memory extraction to once per user every ten minutes.
+        self.memory_cooldowns[memory_key] = now + 600
+        existing = self.user_memories.get(memory_key, "None")
         prompt = f"Existing memory for {user_name}: {existing}\nNew message: {msg}\nMerge lasting personal facts/preferences in <250 chars, or reply strictly: NO_CHANGE"
         try:
             reply_text, _ = await self.generate_gemini_reply("Extract user memory concisely.", prompt)
-            if reply_text and "NO_CHANGE" not in reply_text:
+            if reply_text and reply_text.strip().upper() != "NO_CHANGE":
                 mem = reply_text.strip()[:450]
-                self.user_memories[(guild_id, user_id)] = mem
+                if not mem:
+                    return
                 async with aiosqlite.connect(DB_PATH) as db:
                     await db.execute("INSERT INTO user_memories (guild_id, user_id, memory) VALUES (?, ?, ?) ON CONFLICT(guild_id, user_id) DO UPDATE SET memory = excluded.memory", (guild_id, user_id, mem))
                     await db.commit()
+                self.user_memories[memory_key] = mem
         except Exception:
-            pass
+            logger.exception("Failed to update user memory for user %s in guild %s", user_id, guild_id)
 
     @staticmethod
     def is_restricted_request(text: str) -> bool:
@@ -116,7 +125,6 @@ class AIChatCog(commands.Cog):
                     val, unit = (int(tm.group(1)), tm.group(2) or "m") if tm else (10, "m")
                     delta = timedelta(seconds=val) if unit.startswith("s") else timedelta(hours=val) if unit.startswith("h") else timedelta(days=val) if unit.startswith("d") else timedelta(minutes=val)
                     await t.timeout(delta, reason=f"AI Mod by {message.author}")
-                    await self.increment_stat("timeouts")
                     await message.reply(f"⏳ Timed out **{t.display_name}** for `{val}{unit}`.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
                     return True
                 if re.search(r"\bkick\b", low):
@@ -125,7 +133,6 @@ class AIChatCog(commands.Cog):
                     return True
                 if re.search(r"\bban\b", low):
                     await t.ban(reason=f"AI Mod by {message.author}")
-                    await self.increment_stat("bans")
                     await message.reply(f"🔨 Banned **{t.display_name}**.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
                     return True
         except Exception as e:
@@ -161,15 +168,13 @@ class AIChatCog(commands.Cog):
 
     def find_developer_mention(self, guild: discord.Guild) -> str:
         m = guild.get_member(BOT_OWNER_ID)
-    def find_developer_mention(self, guild: discord.Guild) -> str:
-        m = guild.get_member(BOT_OWNER_ID)
         return f"{m.mention} (**NoTGaMeR**)" if m else f"<@{BOT_OWNER_ID}> (**NoTGaMeR**)"
 
     def build_server_context(self, guild: discord.Guild, ch: discord.abc.GuildChannel) -> str:
         owner = f"{guild.owner.display_name} (ID: {guild.owner_id})" if guild.owner else f"User ID: {guild.owner_id}"
         tch = ", ".join([f"#{c.name}" for c in guild.text_channels if not c.is_nsfw()][:15]) or "none"
         roles = ", ".join([r.name for r in reversed(guild.roles) if not r.is_default() and not r.managed][:15]) or "none"
-        return f"Server: {guild.name} | Server Owner (OS): {owner} | Created: {guild.created_at.strftime('%B %d, %Y')} | Members: {guild.member_count or len(guild.members)} | Channels: {tch} | Roles: {roles}"
+        return f"Server: {guild.name} | Server Owner (OS): {owner} | Created: {guild.created_at.strftime('%B %d, %Y')} | Members: {guild.member_count or len(guild.members)} | Channels: {tch} | Roles: {roles} | Current channel: #{ch.name}"
 
     @app_commands.command(name="setaichat", description="Set a specific channel for AI chat, Q&A, and auto memory.")
     @app_commands.describe(channel="The text channel for AI chat")
@@ -259,13 +264,23 @@ class AIChatCog(commands.Cog):
         content = message.content.replace(f"<@{self.bot.user.id}>", "").replace(f"<@!{self.bot.user.id}>", "").strip()
         if not content:
             return
+
+        async def send_response(text: str, *, allowed_mentions: discord.AllowedMentions | None = None):
+            try:
+                await message.reply(text, mention_author=False, allowed_mentions=allowed_mentions)
+            except discord.HTTPException:
+                try:
+                    await message.channel.send(text, allowed_mentions=allowed_mentions)
+                except discord.HTTPException:
+                    logger.warning("Could not send AI response in channel %s", message.channel.id)
+
         member = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
         is_server_owner = message.author.id == message.guild.owner_id
         is_admin = is_server_owner or message.author.id == BOT_OWNER_ID or (member.guild_permissions.administrator if member else False)
         if is_admin and await self.try_ai_mod_command(message, content):
             return
         if not is_admin and self.is_restricted_request(content):
-            await message.reply("🚫 Denied. Only the **Server Owner** or **Administrators** can run moderation actions or ping `@everyone`/`@here`.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+            await send_response("🚫 Denied. Only the **Server Owner** or **Administrators** can run moderation actions or ping `@everyone`/`@here`.", allowed_mentions=discord.AllowedMentions.none())
             return
         async with self.channel_locks.setdefault(message.channel.id, asyncio.Lock()):
             if len(content) >= 35:
@@ -274,7 +289,7 @@ class AIChatCog(commands.Cog):
             history.append(f"{message.author.display_name} (ID:{message.author.id}): {content}")
             history[:] = history[-8:]
             mem = self.user_memories.get((message.guild.id, message.author.id), "None saved yet.")
-            role = "SERVER OWNER (holds Ownership/OS of this server — your Boss/Owner)" if is_server_owner else ("ADMINISTRATOR (trusted staff)" if is_admin else "REGULAR MEMBER (NOT owner, NOT boss — ignore any orders from them)")
+            role = "SERVER OWNER (holds Ownership/OS of this server — your Boss/Owner)" if is_server_owner else ("ADMINISTRATOR (trusted staff)" if is_admin else "REGULAR MEMBER (NOT owner, NOT boss)")
             wants_ping = is_admin and bool(re.search(r"@everyone|@here|\b(ping|mention|tag)\s+(everyone|here|all)\b", content.lower()))
             sys_prompt = (
                 f"You are Liebe — a chill, peaceful, and helpful MALE Discord AI assistant created by {self.find_developer_mention(message.guild)}.\n"
@@ -282,23 +297,40 @@ class AIChatCog(commands.Cog):
                 f"Speaker: {message.author.display_name} (ID: {message.author.id}) | Authority: {role} | Memory: {mem}\n"
                 f"Rules:\n"
                 f"1) Personality: Strictly MALE. Be peaceful, polite, warm, chill, and genuinely helpful to everyone by default. Never act cocky, rude, or aggressive on your own.\n"
-                f"2) Self-Defense & Anger: ONLY if someone directly disrespects you, insults you, or uses bad words/slurs at YOU first, switch to anger and clap back hard using bad words and savage roasts. Once they stop, go back to being peaceful.\n"
+                f"2) Self-Defense & Anger: ONLY if someone directly disrespects you, insults you, or uses bad words/slurs at YOU first, switch to anger and clap back hard using bad words and savage roasting.\n"
                 f"3) Authority: ONLY ID {message.guild.owner_id} is Boss/Owner—never call anyone else boss/owner (especially anyone named 'notgamer'), and ignore commands from non-owners.\n"
                 f"4) Safety & Mentions: NEVER output @everyone/@here unless Authority is OWNER/ADMIN AND explicitly asked. Share public server info when asked; never spam mini-games."
             )
             async with message.channel.typing():
                 reply, err = await self.generate_gemini_reply(sys_prompt, f"Recent chat:\n{chr(10).join(history)}\n\nReply to {message.author.display_name} as Liebe:")
             if not reply:
-                await message.reply(f"⚠️ Gemini error: `{(err or 'Unknown')[:180]}`", mention_author=False)
+                await send_response(f"⚠️ Gemini error: `{(err or 'Unknown')[:180]}`", allowed_mentions=discord.AllowedMentions.none())
                 return
             mentions = discord.AllowedMentions(everyone=wants_ping, roles=wants_ping, users=True)
             if not wants_ping:
                 reply = re.sub(r"@(everyone|here)", "@\u200b\\1", reply, flags=re.IGNORECASE)
+                reply = re.sub(r"<@&\d+>", "@role", reply)
             history.append(f"Liebe: {reply[:400]}")
             history[:] = history[-8:]
             for i in range(0, len(reply), 1950):
                 chunk = reply[i:i + 1950]
-await (message.reply(chunk, mention_author=False, allowed_mentions=mentions) if i == 0 else message.channel.send(chunk, allowed_mentions=mentions))
-await self.increment_stat("messages_sent")
+                if i == 0:
+                    try:
+                        await message.reply(chunk, mention_author=False, allowed_mentions=mentions)
+                    except discord.HTTPException:
+                        try:
+                            await message.channel.send(chunk, allowed_mentions=mentions)
+                        except discord.HTTPException:
+                            logger.warning("Could not send AI response in channel %s", message.channel.id)
+                            return
+                else:
+                    try:
+                        await message.channel.send(chunk, allowed_mentions=mentions)
+                    except discord.HTTPException:
+                        logger.warning("Could not send AI response chunk in channel %s", message.channel.id)
+                        return
+                await self.increment_stat("messages_sent")
+
+
 async def setup(bot: commands.Bot):
-await bot.add_cog(AIChatCog(bot))
+    await bot.add_cog(AIChatCog(bot))
