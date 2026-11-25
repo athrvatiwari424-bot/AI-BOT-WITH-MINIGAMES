@@ -21,8 +21,8 @@ class AIChatCog(commands.Cog):
         self.cooldowns: dict[str, float] = {}
         raw_keys = [os.getenv(n) for n in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3")]
         keys = list(dict.fromkeys(k.strip() for k in raw_keys if k and k.strip()))
-        self.clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in keys]
-        self.models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
+        self.clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=7000)) for k in keys]
+        self.models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
         self.active_engine = "Gemini Ready"
 
     async def cog_load(self):
@@ -53,7 +53,7 @@ class AIChatCog(commands.Cog):
             pass
 
     async def auto_update_memory(self, guild_id: int, user_id: int, user_name: str, msg: str):
-        if not self.clients or len(msg.strip()) < 18:
+        if not self.clients or len(msg.strip()) < 35:
             return
         existing = self.user_memories.get((guild_id, user_id), "None")
         prompt = f"Existing memory for {user_name}: {existing}\nNew message: {msg}\nMerge lasting personal facts/preferences in <250 chars, or reply strictly: NO_CHANGE"
@@ -229,23 +229,24 @@ class AIChatCog(commands.Cog):
                 if self.cooldowns.get(tag, 0) > now:
                     continue
                 try:
-                    res = await client.aio.models.generate_content(
-                        model=model_name,
-                        contents=prompt,
-                        config=types.GenerateContentConfig(
-                            system_instruction=system_prompt,
-                            temperature=0.8,
-                            max_output_tokens=420,
-                            safety_settings=safety,
+                    res = await asyncio.wait_for(
+                        client.aio.models.generate_content(
+                            model=model_name,
+                            contents=prompt,
+                            config=types.GenerateContentConfig(
+                                system_instruction=system_prompt,
+                                temperature=0.8,
+                                max_output_tokens=420,
+                                safety_settings=safety,
+                            ),
                         ),
+                        timeout=7.5,
                     )
                     if res and res.text:
                         self.active_engine = f"Gemini Key#{idx + 1} ({model_name})"
                         return res.text.strip(), None
                 except Exception as e:
-                    err_s = str(e)
-                    if "429" in err_s or "RESOURCE_EXHAUSTED" in err_s or "404" in err_s or "403" in err_s:
-                        self.cooldowns[tag] = now + 300
+                    self.cooldowns[tag] = now + 300
                     last_err = f"{tag}: {e}"
         return None, last_err or "All Gemini keys/models are temporarily busy."
 
@@ -267,6 +268,8 @@ class AIChatCog(commands.Cog):
             await message.reply("🚫 Denied. Only the **Server Owner** or **Administrators** can run moderation actions or ping `@everyone`/`@here`.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
             return
         async with self.channel_locks.setdefault(message.channel.id, asyncio.Lock()):
+            if len(content) >= 35:
+                asyncio.create_task(self.auto_update_memory(message.guild.id, message.author.id, message.author.display_name, content))
             history = self.channel_history.setdefault(message.channel.id, [])
             history.append(f"{message.author.display_name} (ID:{message.author.id}): {content}")
             history[:] = history[-8:]
@@ -292,9 +295,10 @@ class AIChatCog(commands.Cog):
             if not wants_ping:
                 reply = re.sub(r"@(everyone|here)", "@\u200b\\1", reply, flags=re.IGNORECASE)
             history.append(f"Liebe: {reply[:400]}")
+            history[:] = history[-8:]
             for i in range(0, len(reply), 1950):
                 chunk = reply[i:i + 1950]
-                await (message.reply(chunk, mention_author=False, allowed_mentions=mentions) if i == 0 else message.channel.send(chunk, allowed_mentions=mentions))
-            await self.increment_stat("messages_sent")
+await (message.reply(chunk, mention_author=False, allowed_mentions=mentions) if i == 0 else message.channel.send(chunk, allowed_mentions=mentions))
+await self.increment_stat("messages_sent")
 async def setup(bot: commands.Bot):
-    await bot.add_cog(AIChatCog(bot))
+await bot.add_cog(AIChatCog(bot))
