@@ -32,6 +32,7 @@ async def load_extensions():
     initial_extensions = [
         "minigames",
         "moderation",
+        "moderation_extras",
         "cricket",
         "music",
         "ai_chat",
