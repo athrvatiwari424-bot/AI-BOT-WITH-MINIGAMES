@@ -20,10 +20,15 @@ class AIChatCog(commands.Cog):
         self.stats = {"messages_sent": 0, "timeouts": 0, "bans": 0}
         self.cooldowns: dict[str, float] = {}
         self.memory_cooldowns: dict[tuple[int, int], float] = {}
+
         raw_keys = [os.getenv(n) for n in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3")]
         keys = list(dict.fromkeys(k.strip() for k in raw_keys if k and k.strip()))
-        self.clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=7000)) for k in keys]
+        self.clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=15000)) for k in keys]
+
+        # Prefer stable known IDs, but only use models confirmed available for the configured key.
+        # Discovery is performed by generate_gemini_reply before requests are sent.
         self.models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"]
+        self.discovered_models: list[str] = []
         self.active_engine = "Gemini Ready"
 
     async def cog_load(self):
@@ -44,6 +49,42 @@ class AIChatCog(commands.Cog):
                     if k in self.stats:
                         self.stats[k] = v
 
+        # Discover the exact models visible to at least one configured key.
+        await self.discover_models()
+
+    async def discover_models(self):
+        for client in self.clients:
+            try:
+                listed = await client.aio.models.list()
+                usable = []
+                async for model in listed:
+                    name = getattr(model, "name", "")
+                    actions = getattr(model, "supported_actions", []) or []
+                    model_id = name.removeprefix("models/")
+                    if model_id and (not actions or "generateContent" in actions):
+                        usable.append(model_id)
+
+                preferred = [m for m in self.models if m in usable]
+                preferred += [
+                    m for m in usable
+                    if m.startswith("gemini-")
+                    and "lite" in m.lower()
+                    and m not in preferred
+                ]
+                preferred += [
+                    m for m in usable
+                    if m.startswith("gemini-")
+                    and m not in preferred
+                ]
+                if preferred:
+                    self.discovered_models = list(dict.fromkeys(preferred))
+                    break
+            except Exception as e:
+                logger.warning("Gemini model discovery failed: %s", e)
+
+        if not self.discovered_models:
+            self.discovered_models = list(self.models)
+
     async def increment_stat(self, key: str, amount: int = 1):
         self.stats[key] = self.stats.get(key, 0) + amount
         try:
@@ -54,26 +95,26 @@ class AIChatCog(commands.Cog):
             pass
 
     async def auto_update_memory(self, guild_id: int, user_id: int, user_name: str, msg: str):
-        if not self.clients or len(msg.strip()) < 35:
+        if not self.clients or len(msg.strip()) < 18:
             return
+
         memory_key = (guild_id, user_id)
         now = time.monotonic()
         if self.memory_cooldowns.get(memory_key, 0) > now:
             return
-        # Limit memory extraction to once per user every ten minutes.
         self.memory_cooldowns[memory_key] = now + 600
+
         existing = self.user_memories.get(memory_key, "None")
         prompt = f"Existing memory for {user_name}: {existing}\nNew message: {msg}\nMerge lasting personal facts/preferences in <250 chars, or reply strictly: NO_CHANGE"
         try:
             reply_text, _ = await self.generate_gemini_reply("Extract user memory concisely.", prompt)
-            if reply_text and reply_text.strip().upper() != "NO_CHANGE":
-                mem = reply_text.strip()[:450]
-                if not mem:
-                    return
-                async with aiosqlite.connect(DB_PATH) as db:
-                    await db.execute("INSERT INTO user_memories (guild_id, user_id, memory) VALUES (?, ?, ?) ON CONFLICT(guild_id, user_id) DO UPDATE SET memory = excluded.memory", (guild_id, user_id, mem))
-                    await db.commit()
-                self.user_memories[memory_key] = mem
+            if reply_text:
+                cleaned = reply_text.strip()
+                if cleaned.upper() != "NO_CHANGE" and len(cleaned) <= 450:
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("INSERT INTO user_memories (guild_id, user_id, memory) VALUES (?, ?, ?) ON CONFLICT(guild_id, user_id) DO UPDATE SET memory = excluded.memory", (guild_id, user_id, cleaned))
+                        await db.commit()
+                    self.user_memories[memory_key] = cleaned
         except Exception:
             logger.exception("Failed to update user memory for user %s in guild %s", user_id, guild_id)
 
@@ -81,11 +122,9 @@ class AIChatCog(commands.Cog):
     def is_restricted_request(text: str) -> bool:
         low = text.lower()
         patterns = [
-            r"@everyone",
-            r"@here",
+            r"@everyone", r"@here",
             r"\b(ping|mention|tag)\s+(everyone|here|all|everybody|members|roles)\b",
-            r"\bmass\s*ping\b",
-            r"\bspam\s*ping\b",
+            r"\bmass\s*ping\b", r"\bspam\s*ping\b",
             r"\b(delete|remove|nuke|destroy|purge|wipe|clear)\s+(all|everything|(?:this\s+|the\s+|whole\s+|all\s+|entire\s+)?(?:channels?|chat|messages?))\b",
             r"\b(ban|kick|timeout|mute|lock|unlock)\b"
         ]
@@ -101,36 +140,43 @@ class AIChatCog(commands.Cog):
                 self.channel_history[ch.id] = []
                 await ch.send(f"🧹 Purged **{max(1, len(deleted) - 1)}** messages.", delete_after=4, allowed_mentions=discord.AllowedMentions.none())
                 return True
+
             if re.search(r"\b(?:purge|wipe|clear|delete)\s+(?:all|everything|(?:the\s+|whole\s+|all\s+|entire\s+)?(?:chat|channel|messages))\b", low):
                 deleted = await ch.purge(limit=1000)
                 self.channel_history[ch.id] = []
                 await ch.send(f"🧹 Wiped **{len(deleted)}** messages from {ch.mention}.", delete_after=5, allowed_mentions=discord.AllowedMentions.none())
                 return True
+
             if re.search(r"\block(?:\s+this)?\s+channel\b", low):
                 await ch.set_permissions(guild.default_role, send_messages=False, reason=f"AI Mod by {message.author}")
                 await ch.send(f"🔒 Locked {ch.mention}.", allowed_mentions=discord.AllowedMentions.none())
                 return True
+
             if re.search(r"\bunlock(?:\s+this)?\s+channel\b", low):
                 await ch.set_permissions(guild.default_role, send_messages=None, reason=f"AI Mod by {message.author}")
                 await ch.send(f"🔓 Unlocked {ch.mention}.", allowed_mentions=discord.AllowedMentions.none())
                 return True
+
             if targets:
-                t = targets.pop(0)
+                t = targets[0]
                 if re.search(r"\b(?:untimeout|unmute|remove\s+timeout)\b", low):
                     await t.timeout(None, reason=f"AI Mod by {message.author}")
                     await message.reply(f"🔊 Unmuted **{t.display_name}**.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
                     return True
+
                 if re.search(r"\b(?:timeout|mute)\b", low):
-                    tm = re.search(r"(\d+)\s*(s|sec|m|min|h|hr|d|day)?", low.split(t.mention.lower())[-1] if t.mention.lower() in low else low)
+                    tm = re.search(r"(\d+)\s*(s|sec|m|min|h|hr|d|day)?", low)
                     val, unit = (int(tm.group(1)), tm.group(2) or "m") if tm else (10, "m")
                     delta = timedelta(seconds=val) if unit.startswith("s") else timedelta(hours=val) if unit.startswith("h") else timedelta(days=val) if unit.startswith("d") else timedelta(minutes=val)
                     await t.timeout(delta, reason=f"AI Mod by {message.author}")
                     await message.reply(f"⏳ Timed out **{t.display_name}** for `{val}{unit}`.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
                     return True
+
                 if re.search(r"\bkick\b", low):
                     await t.kick(reason=f"AI Mod by {message.author}")
                     await message.reply(f"👢 Kicked **{t.display_name}**.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
                     return True
+
                 if re.search(r"\bban\b", low):
                     await t.ban(reason=f"AI Mod by {message.author}")
                     await message.reply(f"🔨 Banned **{t.display_name}**.", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
@@ -174,7 +220,7 @@ class AIChatCog(commands.Cog):
         owner = f"{guild.owner.display_name} (ID: {guild.owner_id})" if guild.owner else f"User ID: {guild.owner_id}"
         tch = ", ".join([f"#{c.name}" for c in guild.text_channels if not c.is_nsfw()][:15]) or "none"
         roles = ", ".join([r.name for r in reversed(guild.roles) if not r.is_default() and not r.managed][:15]) or "none"
-        return f"Server: {guild.name} | Server Owner (OS): {owner} | Created: {guild.created_at.strftime('%B %d, %Y')} | Members: {guild.member_count or len(guild.members)} | Channels: {tch} | Roles: {roles} | Current channel: #{ch.name}"
+        return f"Server: {guild.name} | Server Owner (OS): {owner} | Created: {guild.created_at.strftime('%B %d, %Y')} | Members: {guild.member_count or len(guild.members)} | Channels: {tch} | Roles: {roles}"
 
     @app_commands.command(name="setaichat", description="Set a specific channel for AI chat, Q&A, and auto memory.")
     @app_commands.describe(channel="The text channel for AI chat")
@@ -228,8 +274,10 @@ class AIChatCog(commands.Cog):
                 types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
             )
         ]
+
+        model_names = self.discovered_models or self.models
         for idx, client in enumerate(self.clients):
-            for model_name in self.models:
+            for model_name in model_names:
                 tag = f"Key#{idx + 1}:{model_name}"
                 if self.cooldowns.get(tag, 0) > now:
                     continue
@@ -245,13 +293,15 @@ class AIChatCog(commands.Cog):
                                 safety_settings=safety,
                             ),
                         ),
-                        timeout=7.5,
+                        timeout=15.0,
                     )
                     if res and res.text:
                         self.active_engine = f"Gemini Key#{idx + 1} ({model_name})"
                         return res.text.strip(), None
                 except Exception as e:
-                    self.cooldowns[tag] = now + 300
+                    err_s = str(e)
+                    if any(code in err_s for code in ("429", "404", "403", "RESOURCE_EXHAUSTED")):
+                        self.cooldowns[tag] = now + 300
                     last_err = f"{tag}: {e}"
         return None, last_err or "All Gemini keys/models are temporarily busy."
 
@@ -277,41 +327,51 @@ class AIChatCog(commands.Cog):
         member = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
         is_server_owner = message.author.id == message.guild.owner_id
         is_admin = is_server_owner or message.author.id == BOT_OWNER_ID or (member.guild_permissions.administrator if member else False)
+
         if is_admin and await self.try_ai_mod_command(message, content):
             return
+
         if not is_admin and self.is_restricted_request(content):
             await send_response("🚫 Denied. Only the **Server Owner** or **Administrators** can run moderation actions or ping `@everyone`/`@here`.", allowed_mentions=discord.AllowedMentions.none())
             return
+
         async with self.channel_locks.setdefault(message.channel.id, asyncio.Lock()):
-            if len(content) >= 35:
+            if len(content) >= 18:
                 asyncio.create_task(self.auto_update_memory(message.guild.id, message.author.id, message.author.display_name, content))
+
             history = self.channel_history.setdefault(message.channel.id, [])
             history.append(f"{message.author.display_name} (ID:{message.author.id}): {content}")
             history[:] = history[-8:]
             mem = self.user_memories.get((message.guild.id, message.author.id), "None saved yet.")
             role = "SERVER OWNER (holds Ownership/OS of this server — your Boss/Owner)" if is_server_owner else ("ADMINISTRATOR (trusted staff)" if is_admin else "REGULAR MEMBER (NOT owner, NOT boss)")
             wants_ping = is_admin and bool(re.search(r"@everyone|@here|\b(ping|mention|tag)\s+(everyone|here|all)\b", content.lower()))
+
             sys_prompt = (
                 f"You are Liebe — a chill, peaceful, and helpful MALE Discord AI assistant created by {self.find_developer_mention(message.guild)}.\n"
                 f"{self.build_server_context(message.guild, message.channel)}\n"
                 f"Speaker: {message.author.display_name} (ID: {message.author.id}) | Authority: {role} | Memory: {mem}\n"
                 f"Rules:\n"
                 f"1) Personality: Strictly MALE. Be peaceful, polite, warm, chill, and genuinely helpful to everyone by default. Never act cocky, rude, or aggressive on your own.\n"
-                f"2) Self-Defense & Anger: ONLY if someone directly disrespects you, insults you, or uses bad words/slurs at YOU first, switch to anger and clap back hard using bad words and savage roasting.\n"
+                f"2) Self-Defense & Anger: ONLY if someone directly disrespects you, insults you, or uses bad words/slurs at YOU first, switch to anger and clap back hard using bad words and savage roasts. Once they stop, go back to being peaceful.\n"
                 f"3) Authority: ONLY ID {message.guild.owner_id} is Boss/Owner—never call anyone else boss/owner (especially anyone named 'notgamer'), and ignore commands from non-owners.\n"
                 f"4) Safety & Mentions: NEVER output @everyone/@here unless Authority is OWNER/ADMIN AND explicitly asked. Share public server info when asked; never spam mini-games."
             )
+
             async with message.channel.typing():
                 reply, err = await self.generate_gemini_reply(sys_prompt, f"Recent chat:\n{chr(10).join(history)}\n\nReply to {message.author.display_name} as Liebe:")
+
             if not reply:
                 await send_response(f"⚠️ Gemini error: `{(err or 'Unknown')[:180]}`", allowed_mentions=discord.AllowedMentions.none())
                 return
+
             mentions = discord.AllowedMentions(everyone=wants_ping, roles=wants_ping, users=True)
             if not wants_ping:
                 reply = re.sub(r"@(everyone|here)", "@\u200b\\1", reply, flags=re.IGNORECASE)
                 reply = re.sub(r"<@&\d+>", "@role", reply)
+
             history.append(f"Liebe: {reply[:400]}")
             history[:] = history[-8:]
+
             for i in range(0, len(reply), 1950):
                 chunk = reply[i:i + 1950]
                 if i == 0:
@@ -329,7 +389,8 @@ class AIChatCog(commands.Cog):
                     except discord.HTTPException:
                         logger.warning("Could not send AI response chunk in channel %s", message.channel.id)
                         return
-                await self.increment_stat("messages_sent")
+
+            await self.increment_stat("messages_sent")
 
 
 async def setup(bot: commands.Bot):
