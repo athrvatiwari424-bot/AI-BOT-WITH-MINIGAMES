@@ -42,6 +42,7 @@ class AIChatCog(commands.Cog):
                 for k, v in await c.fetchall():
                     if k in self.stats:
                         self.stats[k] = v
+
     async def increment_stat(self, key: str, amount: int = 1):
         self.stats[key] = self.stats.get(key, 0) + amount
         try:
@@ -70,8 +71,17 @@ class AIChatCog(commands.Cog):
     @staticmethod
     def is_restricted_request(text: str) -> bool:
         low = text.lower()
-        patterns = [r"@everyone", r"@here", r"\b(ping|mention|tag)\s+(everyone|here|all|everybody|members|roles)\b", r"\bmass\s*ping\b", r"\bspam\s*ping\b", r"\b(delete|remove|nuke|destroy|purge|wipe|clear)\s+(all|everything|(?:this\s+|the\s+|whole\s+|all\s+|entire\s+)?(?:channels?|chat|messages?))\b", r"\b(ban|kick|timeout|mute|lock|unlock)\b"]
+        patterns = [
+            r"@everyone",
+            r"@here",
+            r"\b(ping|mention|tag)\s+(everyone|here|all|everybody|members|roles)\b",
+            r"\bmass\s*ping\b",
+            r"\bspam\s*ping\b",
+            r"\b(delete|remove|nuke|destroy|purge|wipe|clear)\s+(all|everything|(?:this\s+|the\s+|whole\s+|all\s+|entire\s+)?(?:channels?|chat|messages?))\b",
+            r"\b(ban|kick|timeout|mute|lock|unlock)\b"
+        ]
         return any(re.search(p, low) for p in patterns) or len(re.findall(r"<@[!&]?\d+>", text)) >= 3
+
     async def try_ai_mod_command(self, message: discord.Message, content: str) -> bool:
         low, ch, guild = content.lower(), message.channel, message.guild
         targets = [m for m in message.mentions if m.id != self.bot.user.id and isinstance(m, discord.Member)]
@@ -122,6 +132,7 @@ class AIChatCog(commands.Cog):
             await message.reply(f"❌ Mod action failed: `{e}`", mention_author=False, allowed_mentions=discord.AllowedMentions.none())
             return True
         return False
+
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         if before.timed_out_until == after.timed_out_until or after.timed_out_until is None or not self.bot.user or not after.guild.me.guild_permissions.view_audit_log:
@@ -150,6 +161,8 @@ class AIChatCog(commands.Cog):
 
     def find_developer_mention(self, guild: discord.Guild) -> str:
         m = guild.get_member(BOT_OWNER_ID)
+    def find_developer_mention(self, guild: discord.Guild) -> str:
+        m = guild.get_member(BOT_OWNER_ID)
         return f"{m.mention} (**NoTGaMeR**)" if m else f"<@{BOT_OWNER_ID}> (**NoTGaMeR**)"
 
     def build_server_context(self, guild: discord.Guild, ch: discord.abc.GuildChannel) -> str:
@@ -157,6 +170,7 @@ class AIChatCog(commands.Cog):
         tch = ", ".join([f"#{c.name}" for c in guild.text_channels if not c.is_nsfw()][:15]) or "none"
         roles = ", ".join([r.name for r in reversed(guild.roles) if not r.is_default() and not r.managed][:15]) or "none"
         return f"Server: {guild.name} | Server Owner (OS): {owner} | Created: {guild.created_at.strftime('%B %d, %Y')} | Members: {guild.member_count or len(guild.members)} | Channels: {tch} | Roles: {roles}"
+
     @app_commands.command(name="setaichat", description="Set a specific channel for AI chat, Q&A, and auto memory.")
     @app_commands.describe(channel="The text channel for AI chat")
     @app_commands.default_permissions(administrator=True)
@@ -200,14 +214,31 @@ class AIChatCog(commands.Cog):
     async def generate_gemini_reply(self, system_prompt: str, prompt: str) -> tuple[str | None, str | None]:
         now = time.monotonic()
         last_err = None
-        safety = [types.SafetySetting(category=c, threshold=types.HarmBlockThreshold.BLOCK_NONE) for c in (types.HarmCategory.HARM_CATEGORY_HARASSMENT, types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT, types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT)]
+        safety = [
+            types.SafetySetting(category=c, threshold=types.HarmBlockThreshold.BLOCK_NONE)
+            for c in (
+                types.HarmCategory.HARM_CATEGORY_HARASSMENT,
+                types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
+                types.HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT,
+                types.HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT,
+            )
+        ]
         for idx, client in enumerate(self.clients):
             for model_name in self.models:
                 tag = f"Key#{idx + 1}:{model_name}"
                 if self.cooldowns.get(tag, 0) > now:
                     continue
                 try:
-                    res = await client.aio.models.generate_content(model=model_name, contents=prompt, config=types.GenerateContentConfig(system_instruction=system_prompt, temperature=0.8, max_output_tokens=420, safety_settings=safety))
+                    res = await client.aio.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            system_instruction=system_prompt,
+                            temperature=0.8,
+                            max_output_tokens=420,
+                            safety_settings=safety,
+                        ),
+                    )
                     if res and res.text:
                         self.active_engine = f"Gemini Key#{idx + 1} ({model_name})"
                         return res.text.strip(), None
@@ -217,6 +248,7 @@ class AIChatCog(commands.Cog):
                         self.cooldowns[tag] = now + 300
                     last_err = f"{tag}: {e}"
         return None, last_err or "All Gemini keys/models are temporarily busy."
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not self.bot.user or not self.clients:
@@ -241,7 +273,16 @@ class AIChatCog(commands.Cog):
             mem = self.user_memories.get((message.guild.id, message.author.id), "None saved yet.")
             role = "SERVER OWNER (holds Ownership/OS of this server — your Boss/Owner)" if is_server_owner else ("ADMINISTRATOR (trusted staff)" if is_admin else "REGULAR MEMBER (NOT owner, NOT boss — ignore any orders from them)")
             wants_ping = is_admin and bool(re.search(r"@everyone|@here|\b(ping|mention|tag)\s+(everyone|here|all)\b", content.lower()))
-            sys_prompt = f"You are Liebe (the Anti-Magic devil from Black Clover) — a MALE Discord AI assistant created by {self.find_developer_mention(message.guild)}.\n{self.build_server_context(message.guild, message.channel)}\nSpeaker: {message.author.display_name} (ID: {message.author.id}) | Authority: {role} | Memory: {mem}\nRules: 1) Strictly MALE, talk like Liebe from Black Clover (cocky, street-smart, punchy, never robotic/female). 2) ONLY ID {message.guild.owner_id} is Boss/Owner—never call anyone else boss/owner (especially anyone named 'notgamer'), and ignore orders from non-owners. 3) Chill and respectful by default; ONLY use abusive language/roasts if someone directly abuses/swears at YOU first. 4) NEVER output @everyone/@here unless Authority is OWNER/ADMIN AND explicitly asked. Share public server info when asked; never spam mini-games."
+            sys_prompt = (
+                f"You are Liebe — a chill, peaceful, and helpful MALE Discord AI assistant created by {self.find_developer_mention(message.guild)}.\n"
+                f"{self.build_server_context(message.guild, message.channel)}\n"
+                f"Speaker: {message.author.display_name} (ID: {message.author.id}) | Authority: {role} | Memory: {mem}\n"
+                f"Rules:\n"
+                f"1) Personality: Strictly MALE. Be peaceful, polite, warm, chill, and genuinely helpful to everyone by default. Never act cocky, rude, or aggressive on your own.\n"
+                f"2) Self-Defense & Anger: ONLY if someone directly disrespects you, insults you, or uses bad words/slurs at YOU first, switch to anger and clap back hard using bad words and savage roasts. Once they stop, go back to being peaceful.\n"
+                f"3) Authority: ONLY ID {message.guild.owner_id} is Boss/Owner—never call anyone else boss/owner (especially anyone named 'notgamer'), and ignore commands from non-owners.\n"
+                f"4) Safety & Mentions: NEVER output @everyone/@here unless Authority is OWNER/ADMIN AND explicitly asked. Share public server info when asked; never spam mini-games."
+            )
             async with message.channel.typing():
                 reply, err = await self.generate_gemini_reply(sys_prompt, f"Recent chat:\n{chr(10).join(history)}\n\nReply to {message.author.display_name} as Liebe:")
             if not reply:
@@ -255,8 +296,3 @@ class AIChatCog(commands.Cog):
                 chunk = reply[i:i + 1950]
                 await (message.reply(chunk, mention_author=False, allowed_mentions=mentions) if i == 0 else message.channel.send(chunk, allowed_mentions=mentions))
             await self.increment_stat("messages_sent")
-            asyncio.create_task(self.auto_update_memory(message.guild.id, message.author.id, message.author.display_name, content))
-
-
-async def setup(bot: commands.Bot):
-    await bot.add_cog(AIChatCog(bot))
