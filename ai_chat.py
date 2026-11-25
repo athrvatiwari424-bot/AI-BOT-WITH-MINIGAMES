@@ -23,7 +23,6 @@ class AIChatCog(commands.Cog):
         raw_keys = [os.getenv(n) for n in ("GEMINI_API_KEY", "GEMINI_API_KEY_2", "GEMINI_API_KEY_3")]
         keys = list(dict.fromkeys(k.strip() for k in raw_keys if k and k.strip()))
         self.clients = [genai.Client(api_key=k, http_options=types.HttpOptions(timeout=9000)) for k in keys]
-        # Restore the model IDs from the version you confirmed was working.
         self.models = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
         self.active_engine = "Gemini Ready"
 
@@ -79,7 +78,13 @@ class AIChatCog(commands.Cog):
     @staticmethod
     def is_restricted_request(text: str) -> bool:
         low = text.lower()
-        patterns = [r"@everyone", r"@here", r"\b(ping|mention|tag)\s+(everyone|here|all|everybody|members|roles)\b", r"\bmass\s*ping\b", r"\bspam\s*ping\b", r"\b(delete|remove|nuke|destroy|purge|wipe|clear)\s+(all|everything|(?:this\s+|the\s+|whole\s+|all\s+|entire\s+)?(?:channels?|chat|messages?))\b", r"\b(ban|kick|timeout|mute|lock|unlock)\b"]
+        patterns = [
+            r"@everyone", r"@here",
+            r"\b(ping|mention|tag)\s+(everyone|here|all|everybody|members|roles)\b",
+            r"\bmass\s*ping\b", r"\bspam\s*ping\b",
+            r"\b(delete|remove|nuke|destroy|purge|wipe|clear)\s+(all|everything|(?:this\s+|the\s+|whole\s+|all\s+|entire\s+)?(?:channels?|chat|messages?))\b",
+            r"\b(ban|kick|timeout|mute|lock|unlock)\b",
+        ]
         return any(re.search(pattern, low) for pattern in patterns) or len(re.findall(r"<@[!&]?\d+>", text)) >= 3
 
     async def try_ai_mod_command(self, message: discord.Message, content: str) -> bool:
@@ -166,9 +171,9 @@ class AIChatCog(commands.Cog):
 
     def build_server_context(self, guild: discord.Guild, channel: discord.abc.GuildChannel) -> str:
         owner = f"{guild.owner.display_name} (ID: {guild.owner_id})" if guild.owner else f"User ID: {guild.owner_id}"
-        text_channels = ", ".join(f"#{c.name}" for c in guild.text_channels if not c.is_nsfw()][:15]) or "none"
-        roles = ", ".join(r.name for r in reversed(guild.roles) if not r.is_default() and not r.managed)[:15] or "none"
-        return f"Server: {guild.name} | Server Owner: {owner} | Created: {guild.created_at.strftime('%B %d, %Y')} | Members: {guild.member_count or len(guild.members)} | Channels: {text_channels} | Roles: {roles}"
+        text_channels = ", ".join(f"#{item.name}" for item in [c for c in guild.text_channels if not c.is_nsfw()][:15]) or "none"
+        roles = ", ".join(role.name for role in [r for r in reversed(guild.roles) if not r.is_default() and not r.managed][:15]) or "none"
+        return f"Server: {guild.name} | Server Owner: {owner} | Created: {guild.created_at.strftime('%B %d, %Y')} | Members: {guild.member_count or len(guild.members)} | Channels: {text_channels} | Roles: {roles} | Current channel: #{channel.name}"
 
     @app_commands.command(name="setaichat", description="Set a specific channel for AI chat, Q&A, and auto memory.")
     @app_commands.describe(channel="The text channel for AI chat")
@@ -225,7 +230,6 @@ class AIChatCog(commands.Cog):
                         return response.text.strip(), None
                 except Exception as error:
                     error_text = str(error)
-                    # Quickly skip invalid model IDs on subsequent requests; retry rate-limited models sooner.
                     self.cooldowns[tag] = time.monotonic() + (3600 if "404" in error_text else 60 if "429" in error_text or "RESOURCE_EXHAUSTED" in error_text else 300)
                     last_error = f"{tag}: {error}"
         return None, last_error or "All Gemini keys/models are temporarily busy."
@@ -234,7 +238,6 @@ class AIChatCog(commands.Cog):
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not self.bot.user or not self.clients:
             return
-        # Mentioning Liebe opts in from any channel; otherwise only answer in the configured channel.
         bot_mentioned = self.bot.user in message.mentions or bool(re.search(rf"<@!?{self.bot.user.id}>", message.content))
         if self.ai_channels.get(message.guild.id) != message.channel.id and not bot_mentioned:
             return
@@ -260,8 +263,6 @@ class AIChatCog(commands.Cog):
             await send_response("🚫 Denied. Only the **Server Owner** or **Administrators** can run moderation actions or ping `@everyone`/`@here`.", discord.AllowedMentions.none())
             return
 
-        # Do not hold the channel lock while waiting on Gemini: simultaneous messages
-        # should not queue behind another user's model request.
         lock = self.channel_locks.setdefault(message.channel.id, asyncio.Lock())
         async with lock:
             history = self.channel_history.setdefault(message.channel.id, [])
@@ -290,18 +291,17 @@ class AIChatCog(commands.Cog):
             history[:] = history[-8:]
         for index in range(0, len(reply), 1950):
             part = reply[index:index + 1950]
-            await send_response(part, allowed) if index == 0 else await self._send_channel(message.channel, part, allowed)
+            if index == 0:
+                await send_response(part, allowed)
+            else:
+                try:
+                    await message.channel.send(part, allowed_mentions=allowed)
+                except discord.HTTPException:
+                    logger.warning("Could not send AI response chunk in channel %s", message.channel.id)
+                    return
         await self.increment_stat("messages_sent")
-        # Memory extraction is intentionally started after the reply so it cannot
-        # compete with the user's response for API quota/latency.
         if len(content) >= 35:
             asyncio.create_task(self.auto_update_memory(message.guild.id, message.author.id, message.author.display_name, content))
-
-    async def _send_channel(self, channel: discord.abc.Messageable, text: str, allowed_mentions: discord.AllowedMentions):
-        try:
-            await channel.send(text, allowed_mentions=allowed_mentions)
-        except discord.HTTPException:
-            logger.warning("Could not send an AI response chunk")
 
 
 async def setup(bot: commands.Bot):
