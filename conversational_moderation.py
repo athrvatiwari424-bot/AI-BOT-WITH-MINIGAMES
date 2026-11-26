@@ -62,6 +62,7 @@ class ConversationalModerationCog(commands.Cog):
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("CREATE TABLE IF NOT EXISTS mod_config (guild_id INTEGER PRIMARY KEY, mute_role_id INTEGER, mod_role_id INTEGER, modlog_channel_id INTEGER)")
             await db.execute("CREATE TABLE IF NOT EXISTS mod_cases (case_id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, action TEXT NOT NULL, target_id INTEGER NOT NULL, moderator_id INTEGER NOT NULL, reason TEXT NOT NULL, duration TEXT, created_at TEXT NOT NULL, log_channel_id INTEGER, log_message_id INTEGER)")
+            await db.execute("CREATE TABLE IF NOT EXISTS mod_warnings (case_id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, moderator_id INTEGER NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)")
             await db.execute("CREATE TABLE IF NOT EXISTS mod_only_channels (channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL)")
             await db.execute("CREATE TABLE IF NOT EXISTS lockdown_overwrites (channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, send_messages INTEGER)")
             await db.execute("CREATE TABLE IF NOT EXISTS scheduled_actions (guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, action TEXT NOT NULL, expires_at REAL NOT NULL, PRIMARY KEY (guild_id,user_id,action))")
@@ -76,8 +77,9 @@ class ConversationalModerationCog(commands.Cog):
             async with db.execute("SELECT guild_id,user_id,action,expires_at FROM scheduled_actions") as cur:
                 for gid, uid, action, expiry in await cur.fetchall():
                     task = asyncio.create_task(self._schedule_action(gid, uid, action, max(0, expiry-time.time())))
-                    (self.tempban_tasks if action == "unban" else self.lock_tasks).add(task)
-                    task.add_done_callback((self.tempban_tasks if action == "unban" else self.lock_tasks).discard)
+                    collection = self.tempban_tasks if action == "unban" else self.lock_tasks
+                    collection.add(task)
+                    task.add_done_callback(collection.discard)
 
     def _is_mod(self, member: discord.Member, guild: discord.Guild) -> bool:
         role_id = self.mod_roles.get(guild.id)
@@ -97,6 +99,58 @@ class ConversationalModerationCog(commands.Cog):
                 logger.exception("Could not send moderation response")
                 return None
         return sent
+
+    async def _punishment_embed(self, message: discord.Message, target: discord.abc.User, action: str, reason: str, duration: str | None = None, case_id: int | None = None):
+        action_titles = {
+            "warn": "Warning Issued",
+            "mute": "Timeout Issued",
+            "ban": "Member Banned",
+            "tempban": "Temporary Ban Issued",
+            "softban": "Member Softbanned",
+            "kick": "Member Kicked",
+            "unmute": "Member Unmuted",
+            "unban": "Member Unbanned",
+            "massban": "Members Banned",
+        }
+        colors = {
+            "warn": discord.Color.gold(),
+            "mute": discord.Color.orange(),
+            "ban": discord.Color.red(),
+            "tempban": discord.Color.orange(),
+            "softban": discord.Color.orange(),
+            "kick": discord.Color.dark_orange(),
+            "unmute": discord.Color.green(),
+            "unban": discord.Color.green(),
+            "massban": discord.Color.red(),
+        }
+        embed = discord.Embed(title=action_titles.get(action, action.title()), color=colors.get(action, discord.Color.orange()), timestamp=datetime.now(timezone.utc))
+        if isinstance(target, (discord.Member, discord.User)):
+            embed.set_thumbnail(url=target.display_avatar.url)
+        warning_count = None
+        if action == "warn":
+            async with aiosqlite.connect(DB_PATH) as db:
+                async with db.execute("SELECT COUNT(*) FROM mod_cases WHERE guild_id=? AND target_id=? AND action='warn'", (message.guild.id, target.id)) as cur:
+                    row = await cur.fetchone()
+                    warning_count = row[0] if row else 0
+        embed.add_field(name="User", value=f"{target.mention if hasattr(target, 'mention') else target} (`{target.id}`)", inline=False)
+        if warning_count is not None:
+            embed.add_field(name="Warnings", value=f"{warning_count}/3", inline=True)
+        if duration:
+            embed.add_field(name="Duration", value=duration, inline=True)
+        embed.add_field(name="Reason", value=reason[:1024] or "No reason provided", inline=False)
+        if case_id:
+            embed.add_field(name="Case", value=f"#{case_id}", inline=True)
+        embed.add_field(name="Moderator", value=f"{message.author.mention} (`{message.author.id}`)", inline=False)
+        embed.set_footer(text=f"{message.guild.name} Moderation")
+        await message.reply(embed=embed, mention_author=False, allowed_mentions=discord.AllowedMentions(users=[target.id] if hasattr(target, "id") else []))
+
+    async def _dm(self, user: discord.abc.User, guild: discord.Guild, action: str, reason: str, duration: str | None = None):
+        text = f"Server: **{guild.name}**\nAction: **{action}**\nReason: {reason}"
+        if duration: text += f"\nDuration: **{duration}**"
+        try:
+            await user.send(text)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
 
     def _targets(self, message: discord.Message, text: str) -> list[discord.Member]:
         found = {m.id: m for m in message.mentions if message.guild.me and m.id != message.guild.me.id}
@@ -142,7 +196,8 @@ class ConversationalModerationCog(commands.Cog):
             embed.add_field(name="Target", value=user_text, inline=False)
             embed.add_field(name="Moderator", value=f"{message.author} ({message.author.id})", inline=False)
             embed.add_field(name="Reason", value=reason[:1024], inline=False)
-            if duration: embed.add_field(name="Duration", value=duration, inline=True)
+            if duration:
+                embed.add_field(name="Duration", value=duration, inline=True)
             try:
                 log_message = await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
                 async with aiosqlite.connect(DB_PATH) as db:
@@ -151,12 +206,6 @@ class ConversationalModerationCog(commands.Cog):
             except discord.HTTPException:
                 logger.exception("Could not send mod log case %s", case_id)
         return case_id
-
-    async def _dm(self, user: discord.abc.User, guild: discord.Guild, action: str, reason: str, duration: str | None = None):
-        text = f"Server: **{guild.name}**\nAction: **{action}**\nReason: {reason}"
-        if duration: text += f"\nDuration: **{duration}**"
-        try: await user.send(text)
-        except discord.HTTPException: pass
 
     async def _schedule_action(self, guild_id: int, user_id: int, action: str, seconds: float):
         await asyncio.sleep(seconds)
@@ -169,11 +218,12 @@ class ConversationalModerationCog(commands.Cog):
                 if member:
                     await member.timeout(None, reason="Temporary mute expired")
                     role = guild.get_role(self.mute_roles.get(guild_id, 0))
-                    if role: await member.remove_roles(role, reason="Temporary mute expired")
+                    if role:
+                        await member.remove_roles(role, reason="Temporary mute expired")
             elif guild and action.startswith("unlock:"):
-                channel_id = int(action.split(":",1)[1])
-                channel = guild.get_channel(channel_id)
-                if isinstance(channel, discord.TextChannel): await self._set_lock(channel, False, "Timed lockdown expired")
+                channel = guild.get_channel(int(action.split(":",1)[1]))
+                if isinstance(channel, discord.TextChannel):
+                    await self._set_lock(channel, False, "Timed lockdown expired")
         except discord.HTTPException:
             logger.exception("Scheduled moderation action failed")
         finally:
@@ -218,46 +268,52 @@ class ConversationalModerationCog(commands.Cog):
                 if action == "tempban" and (not duration_s or duration_s < 60 or duration_s > 365*86400):
                     return await self._reply(message, "Use a valid tempban duration from 1 minute to 365 days, e.g. `tempban @user 7d reason`.")
                 await guild.ban(user, reason=reason[:450], delete_message_seconds=days*86400)
-                if action == "softban": await guild.unban(discord.Object(id=uid), reason=f"Softban by {actor}")
-                if action == "tempban": await self._schedule(guild.id,uid,"unban",duration_s)
+                if action == "softban":
+                    await guild.unban(discord.Object(id=uid), reason=f"Softban by {actor}")
+                if action == "tempban":
+                    await self._schedule(guild.id,uid,"unban",duration_s)
                 await self._dm(user,guild,action,reason,duration)
-                await self._case(message,action,uid,reason,duration)
-                mention = f"<@{uid}>"
-                if action == "ban": text=f"🔨 **{mention}** has been banned. | **Reason:** {reason}"
-                elif action == "tempban": text=f"⏳ **{mention}** has been temporarily banned for **{duration}**. | **Reason:** {reason}"
-                else: text=f"🧹 **{mention}** has been softbanned (messages cleared). | **Reason:** {reason}"
-                return await self._reply(message,text)
-            if action == "kick":
-                await target.kick(reason=reason[:450]); await self._dm(target,guild,action,reason); await self._case(message,action,uid,reason)
-                return await self._reply(message,f"👢 **<@{uid}>** has been kicked. | **Reason:** {reason}")
-            if action == "warn":
-                case_id=await self._case(message,"warn",uid,reason); await self._dm(target,guild,"warn",reason)
-                return await self._reply(message,f"⚠️ **<@{uid}>** has been warned. Please follow the server rules. | **Reason:** {reason} (Case #{case_id})")
-            if action == "mute":
+                case_id = await self._case(message,action,uid,reason,duration)
+                await self._punishment_embed(message, user, action, reason, duration, case_id)
+            elif action == "kick":
+                await target.kick(reason=reason[:450])
+                await self._dm(target,guild,action,reason)
+                case_id = await self._case(message,action,uid,reason)
+                await self._punishment_embed(message, target, action, reason, None, case_id)
+            elif action == "warn":
+                case_id = await self._case(message,"warn",uid,reason)
+                await self._dm(target,guild,"warn",reason)
+                await self._punishment_embed(message, target, "warn", reason, None, case_id)
+            elif action == "mute":
                 if not duration_s or duration_s > 28*86400:
                     return await self._reply(message,"Use `mute @user 10m reason` (maximum timeout is 28 days).")
-                await target.timeout(discord.utils.utcnow()+discord.timedelta(seconds=duration_s), reason=reason[:450])
-                await self._dm(target,guild,action,reason,duration); await self._case(message,action,uid,reason,duration)
-                return await self._reply(message,f"🔇 **<@{uid}>** has been muted for **{duration}**. | **Reason:** {reason}")
-            if action == "unmute":
-                await target.timeout(None,reason=reason[:450]); role=guild.get_role(self.mute_roles.get(guild.id,0))
-                if role and role in target.roles: await target.remove_roles(role,reason=reason[:450])
-                await self._case(message,action,uid,reason)
-                return await self._reply(message,f"🔊 **<@{uid}>** has been unmuted. | **Reason:** {reason}")
+                await target.timeout(discord.utils.utcnow()+timedelta(seconds=duration_s), reason=reason[:450])
+                await self._dm(target,guild,action,reason,duration)
+                case_id = await self._case(message,action,uid,reason,duration)
+                await self._punishment_embed(message, target, action, reason, duration, case_id)
+            elif action == "unmute":
+                await target.timeout(None,reason=reason[:450])
+                role=guild.get_role(self.mute_roles.get(guild.id,0))
+                if role and role in target.roles:
+                    await target.remove_roles(role,reason=reason[:450])
+                case_id = await self._case(message,action,uid,reason)
+                await self._punishment_embed(message, target, action, reason, None, case_id)
         except discord.Forbidden:
-            return await self._reply(message,"Discord denied the action. Check bot permissions and role hierarchy.")
+            await self._reply(message,"Discord denied the action. Check bot permissions and role hierarchy.")
         except discord.HTTPException:
             logger.exception("Punishment %s failed",action)
-            return await self._reply(message,f"{action.title()} failed due to a Discord API error.")
+            await self._reply(message,f"{action.title()} failed due to a Discord API error.")
 
     async def _set_lock(self, channel: discord.TextChannel, locked: bool, reason: str):
-        everyone=channel.guild.default_role; overwrite=channel.overwrites_for(everyone)
+        everyone=channel.guild.default_role
+        overwrite=channel.overwrites_for(everyone)
         async with aiosqlite.connect(DB_PATH) as db:
             if locked:
                 await db.execute("INSERT OR IGNORE INTO lockdown_overwrites (channel_id,guild_id,send_messages) VALUES (?,?,?)",(channel.id,channel.guild.id,None if overwrite.send_messages is None else int(overwrite.send_messages)))
                 old=None
             else:
-                async with db.execute("SELECT send_messages FROM lockdown_overwrites WHERE channel_id=?",(channel.id,)) as cur: old=await cur.fetchone()
+                async with db.execute("SELECT send_messages FROM lockdown_overwrites WHERE channel_id=?",(channel.id,)) as cur:
+                    old=await cur.fetchone()
                 await db.execute("DELETE FROM lockdown_overwrites WHERE channel_id=?",(channel.id,))
             await db.commit()
         overwrite.send_messages=False if locked else (None if not old or old[0] is None else bool(old[0]))
@@ -293,8 +349,11 @@ class ConversationalModerationCog(commands.Cog):
             elif mode=="contains": text=f'🧹 Deleted **{len(deleted)}** messages containing "{phrase}".'
             else: text=f"🧹 Deleted **{len(deleted)}** messages."
             await self._reply(message,text,delete_after=3)
-        except discord.Forbidden: await self._reply(message,"Discord denied purge; check Manage Messages and Read Message History.")
-        except discord.HTTPException: logger.exception("Purge failed"); await self._reply(message,"Purge failed due to a Discord API error.")
+        except discord.Forbidden:
+            await self._reply(message,"Discord denied purge; check Manage Messages and Read Message History.")
+        except discord.HTTPException:
+            logger.exception("Purge failed")
+            await self._reply(message,"Purge failed due to a Discord API error.")
 
     @commands.Cog.listener()
     async def on_guild_channel_create(self,channel:discord.abc.GuildChannel):
@@ -303,17 +362,22 @@ class ConversationalModerationCog(commands.Cog):
             try:
                 ow=channel.overwrites_for(role); ow.send_messages=False; ow.add_reactions=False; ow.speak=False
                 await channel.set_permissions(role,overwrite=ow,reason="Sync mute role restrictions")
-            except discord.HTTPException: logger.exception("Mute role sync failed")
+            except discord.HTTPException:
+                logger.exception("Mute role sync failed")
 
     @commands.Cog.listener()
     async def on_message(self,message:discord.Message):
         if message.author.bot or not message.guild or not isinstance(message.author,discord.Member): return
         raw=re.sub(r"^(?:liebe[\s,]+)","",message.content.strip(),flags=re.I).strip()
-        if self.bot.user: raw=re.sub(rf"^<@!?{self.bot.user.id}>\s*","",raw).strip()
+        if self.bot.user:
+            raw=re.sub(rf"^<@!?{self.bot.user.id}>\s*","",raw).strip()
         if message.channel.id in self.mod_only_channels and not self._is_mod(message.author,message.guild) and (raw.startswith("!") or re.match(r"^(?:"+"|".join(COMMANDS)+r")\b",raw,re.I)):
-            try: await message.delete()
-            except discord.HTTPException: pass
-            await self._reply(message,"Commands are restricted to moderators in this channel."); return
+            try:
+                await message.delete()
+            except discord.HTTPException:
+                pass
+            await self._reply(message,"Commands are restricted to moderators in this channel.")
+            return
         match=re.match(r"^("+"|".join(COMMANDS)+r")\b\s*(.*)$",raw,re.I)
         if not match: return
         action,args=match.group(1).lower(),match.group(2).strip()
@@ -328,15 +392,19 @@ class ConversationalModerationCog(commands.Cog):
                 targets=self._targets(message,args)
                 if not targets or len(targets)>MAX_MASSBAN: return await self._reply(message,f"Mention 1 to {MAX_MASSBAN} members for massban.")
                 succeeded=[]
+                reason=re.sub(r"<@!?\d+>|\b\d{15,22}\b","",args).strip() or "No reason provided"
                 for target in targets:
                     if not self._hierarchy_ok(message,target): continue
                     if not await self._has(message,"ban_members"): break
                     try:
-                        reason=re.sub(r"<@!?\d+>|\b\d{15,22}\b","",args).strip() or "No reason provided"
-                        await guild.ban(target,reason=reason[:450]); await self._dm(target,guild,"massban",reason)
-                        await self._case(message,"massban",target.id,reason); succeeded.append(str(target))
-                    except discord.HTTPException: logger.exception("Massban error for %s",target.id)
-                return await self._reply(message,f"🔨 Banned **{len(succeeded)}** users: {', '.join(succeeded)}. | **Reason:** {reason}")
+                        await guild.ban(target,reason=reason[:450])
+                        await self._dm(target,guild,"massban",reason)
+                        await self._case(message,"massban",target.id,reason)
+                        succeeded.append(target)
+                    except discord.HTTPException:
+                        logger.exception("Massban error for %s",target.id)
+                await self._reply(message,f"🔨 Banned **{len(succeeded)}** users: {', '.join(target.mention for target in succeeded)}. | **Reason:** {reason}")
+                return
             return await self._punishment(message,action,args)
 
         if action in ("purge","cleanup"):
@@ -344,38 +412,50 @@ class ConversationalModerationCog(commands.Cog):
             rest=args
             if action=="purge":
                 mt=re.match(r"(user|bot|contains|links|images|files|embeds|emoji|reactions)\b\s*(.*)$",args,re.I)
-                if mt: mode,rest=mt.group(1).lower(),mt.group(2).strip()
+                if mt:
+                    mode,rest=mt.group(1).lower(),mt.group(2).strip()
             if mode=="reactions":
                 if not await self._has(message,"manage_messages"): return await self._reply(message,"You and I both need Manage Messages permission.")
                 if not isinstance(message.channel,discord.TextChannel): return await self._reply(message,"Use this in a text channel.")
-                nm=re.search(r"\b(\d{1,3})\b",rest); amount=min(MAX_PURGE,int(nm.group(1))) if nm else MAX_PURGE; count=0
+                nm=re.search(r"\b(\d{1,3})\b",rest); amount=min(MAX_PURGE,int(nm.group(1))) if nm else MAX_PURGE
+                count=0
                 try:
                     async for item in message.channel.history(limit=amount):
-                        if not item.pinned and item.reactions: await item.clear_reactions(); count+=1
+                        if not item.pinned and item.reactions:
+                            await item.clear_reactions()
+                            count+=1
                     return await self._reply(message,f"🧹 Cleared reactions from **{count}** messages.",delete_after=3)
-                except discord.HTTPException: return await self._reply(message,"Could not clear reactions; check permissions.")
+                except discord.HTTPException:
+                    return await self._reply(message,"Could not clear reactions; check permissions.")
             return await self._purge(message,mode,rest)
 
         if action in ("lockdown","unlockdown"):
             if not await self._has(message,"manage_channels"): return await self._reply(message,"You and I both need Manage Channels permission.")
-            locked=action=="lockdown"; server=args.casefold().startswith("server")
-            cm=next(iter(message.channel_mentions),None); channel=cm or message.channel
+            locked=action=="lockdown"
+            server=args.casefold().startswith("server")
+            cm=next(iter(message.channel_mentions),None)
+            channel=cm or message.channel
             if server:
-                channels=guild.text_channels
-                for ch in channels:
-                    try: await self._set_lock(ch,locked,f"{action} by {actor}")
-                    except discord.HTTPException: logger.exception("Lockdown failed for %s",ch.id)
+                for ch in guild.text_channels:
+                    try:
+                        await self._set_lock(ch,locked,f"{action} by {actor}")
+                    except discord.HTTPException:
+                        logger.exception("Lockdown failed for %s",ch.id)
                 return await self._reply(message,"🔒 Server-wide lockdown enabled." if locked else "🔓 Server-wide lockdown lifted.")
             if not isinstance(channel,discord.TextChannel): return await self._reply(message,"Lockdown requires a text channel.")
-            try: await self._set_lock(channel,locked,f"{action} by {actor}")
-            except discord.HTTPException: return await self._reply(message,"Could not update channel permissions.")
+            try:
+                await self._set_lock(channel,locked,f"{action} by {actor}")
+            except discord.HTTPException:
+                return await self._reply(message,"Could not update channel permissions.")
             dur=duration_seconds(args)
-            if locked and dur: await self._schedule(guild.id,0,f"unlock:{channel.id}",dur)
+            if locked and dur:
+                await self._schedule(guild.id,0,f"unlock:{channel.id}",dur)
             return await self._reply(message,f"{'🔒' if locked else '🔓'} **{channel.mention}** has been {'locked' if locked else 'unlocked'}"+(f" for **{duration_label(dur)}**." if locked and dur else "."))
 
         if action=="slowmode":
             if not await self._has(message,"manage_channels"): return await self._reply(message,"You and I both need Manage Channels permission.")
-            ch=next(iter(message.channel_mentions),None) or message.channel; seconds=duration_seconds(args) or 0
+            ch=next(iter(message.channel_mentions),None) or message.channel
+            seconds=duration_seconds(args) or 0
             if not isinstance(ch,discord.TextChannel) or seconds<0 or seconds>21600: return await self._reply(message,"Use `slowmode 30s [#channel]` (0s to 6h).")
             await ch.edit(slowmode_delay=seconds,reason=f"Slowmode set by {actor}")
             return await self._reply(message,f"⏱️ {'Slowmode disabled' if seconds==0 else f'Slowmode set to **{duration_label(seconds)}**'} in **{ch.mention}**.")
@@ -384,14 +464,16 @@ class ConversationalModerationCog(commands.Cog):
             if not await self._has(message,"manage_guild"): return await self._reply(message,"You and I both need Manage Server permission.")
             ch=next(iter(message.channel_mentions),None)
             if not isinstance(ch,discord.TextChannel): return await self._reply(message,"Use `modlog #channel`.")
-            self.modlog_channels[guild.id]=ch.id; await self._config_save(guild.id)
+            self.modlog_channels[guild.id]=ch.id
+            await self._config_save(guild.id)
             return await self._reply(message,f"✅ Moderation logs will now be sent to **{ch.mention}**.")
 
         if action=="modrole":
             if not await self._has(message,"manage_guild"): return await self._reply(message,"You and I both need Manage Server permission.")
             role=next((r for r in guild.roles if f"<@&{r.id}>" in args),None) or discord.utils.find(lambda r:r.name.casefold()==args.strip().casefold(),guild.roles)
             if not role or role.is_default() or role.managed: return await self._reply(message,"Mention or name a valid moderator role.")
-            self.mod_roles[guild.id]=role.id; await self._config_save(guild.id)
+            self.mod_roles[guild.id]=role.id
+            await self._config_save(guild.id)
             return await self._reply(message,f"✅ **{role.name}** is recognized as the moderator role.")
 
         if action=="muterole":
@@ -402,24 +484,29 @@ class ConversationalModerationCog(commands.Cog):
             else:
                 role=next((r for r in guild.roles if f"<@&{r.id}>" in args),None) or discord.utils.find(lambda r:r.name.casefold()==args.strip().casefold(),guild.roles)
             if not role or role.is_default() or role.managed or not guild.me or role>=guild.me.top_role: return await self._reply(message,"Mention an eligible role, or use `muterole create [name]`.")
-            self.mute_roles[guild.id]=role.id; await self._config_save(guild.id)
+            self.mute_roles[guild.id]=role.id
+            await self._config_save(guild.id)
             for ch in guild.channels:
                 if isinstance(ch,(discord.TextChannel,discord.VoiceChannel,discord.StageChannel)):
                     try:
                         ow=ch.overwrites_for(role); ow.send_messages=False; ow.add_reactions=False; ow.speak=False
                         await ch.set_permissions(role,overwrite=ow,reason="Sync mute role permissions")
-                    except discord.HTTPException: logger.exception("Mute role sync failed in %s",ch.id)
+                    except discord.HTTPException:
+                        logger.exception("Mute role sync failed in %s",ch.id)
             return await self._reply(message,f"✅ Mute role set to **<@&{role.id}>** and channel permissions synced.")
 
         if action in ("role","addrole","removerole"):
-            await self._role_action(message,action,args); return
+            await self._role_action(message,action,args)
+            return
         if action in ("createrole","delrole","rolecolor"):
-            await self._role_admin(message,action,args); return
-
+            await self._role_admin(message,action,args)
+            return
         if action in ("warnings","infractions","removewarn","clearwarn","reason"):
-            await self._case_action(message,action,args); return
+            await self._case_action(message,action,args)
+            return
         if action in ("whois","userinfo","serverinfo"):
-            await self._info(message,action,args); return
+            await self._info(message,action,args)
+            return
 
         if action=="unban":
             if not await self._has(message,"ban_members"): return await self._reply(message,"You and I both need Ban Members permission.")
@@ -427,25 +514,36 @@ class ConversationalModerationCog(commands.Cog):
             if not uid_match: return await self._reply(message,"Use `unban USER_ID [reason]`.")
             uid=int(uid_match.group(1)); reason=re.sub(r"\b\d{15,22}\b","",args).strip() or "No reason provided"
             try:
-                entry=await guild.fetch_ban(discord.Object(id=uid)); await guild.unban(entry.user,reason=reason[:450]); await self._case(message,"unban",uid,reason)
-                return await self._reply(message,f"🔓 **{entry.user}** (`{uid}`) has been unbanned. | **Reason:** {reason}")
-            except discord.NotFound: return await self._reply(message,"That user is not currently banned.")
-            except discord.HTTPException: return await self._reply(message,"Unban failed due to a Discord API error.")
+                entry=await guild.fetch_ban(discord.Object(id=uid))
+                await guild.unban(entry.user,reason=reason[:450])
+                case_id=await self._case(message,"unban",uid,reason)
+                await self._punishment_embed(message,entry.user,"unban",reason,None,case_id)
+            except discord.NotFound:
+                await self._reply(message,"That user is not currently banned.")
+            except discord.HTTPException:
+                await self._reply(message,"Unban failed due to a Discord API error.")
 
     async def _role_action(self,message:discord.Message,action:str,args:str):
         if not await self._has(message,"manage_roles"): return await self._reply(message,"You and I both need Manage Roles permission.")
-        guild=message.guild; sub=re.match(r"^(all|humans|bots)\s+(.+)$",args,re.I) if action=="role" else None
+        guild=message.guild
+        sub=re.match(r"^(all|humans|bots)\s+(.+)$",args,re.I) if action=="role" else None
         if sub:
-            kind,name=sub.groups(); role=next((r for r in guild.roles if f"<@&{r.id}>" in name),None) or discord.utils.find(lambda r:r.name.casefold()==name.strip().casefold(),guild.roles)
+            kind,name=sub.groups()
+            role=next((r for r in guild.roles if f"<@&{r.id}>" in name),None) or discord.utils.find(lambda r:r.name.casefold()==name.strip().casefold(),guild.roles)
             if not role or role.is_default() or role.managed or not guild.me or role>=guild.me.top_role: return await self._reply(message,"Choose an assignable role below my top role.")
             members=[m for m in guild.members if (kind.lower()=="all" or (kind.lower()=="bots")==m.bot) and role not in m.roles and m.top_role<guild.me.top_role]
-            members=members[:MAX_ROLE_BATCH]; await self._reply(message,f"⏳ Adding **{role.name}** to **{len(members)}** members...")
+            members=members[:MAX_ROLE_BATCH]
+            await self._reply(message,f"⏳ Adding **{role.name}** to **{len(members)}** members...")
             count=0
             for member in members:
-                try: await member.add_roles(role,reason=f"Bulk role assigned by {message.author}"); count+=1
-                except discord.HTTPException: await asyncio.sleep(0.5)
+                try:
+                    await member.add_roles(role,reason=f"Bulk role assigned by {message.author}")
+                    count+=1
+                except discord.HTTPException:
+                    await asyncio.sleep(0.5)
                 await asyncio.sleep(0.15)
-            return await self._reply(message,f"✅ Finished adding **{role.name}** to **{count}** members.")
+            await self._reply(message,f"✅ Finished adding **{role.name}** to **{count}** members.")
+            return
         target=next(iter(self._targets(message,args)),None)
         if not target: return await self._reply(message,"Mention a member: `role @member @role`.")
         role=next((r for r in guild.roles if f"<@&{r.id}>" in args),None)
@@ -456,23 +554,30 @@ class ConversationalModerationCog(commands.Cog):
         if not self._hierarchy_ok(message,target): return await self._reply(message,"Target is above your or my role hierarchy.")
         remove=action=="removerole" or (action=="role" and role in target.roles)
         try:
-            if remove: await target.remove_roles(role,reason=f"Role change by {message.author}")
-            else: await target.add_roles(role,reason=f"Role change by {message.author}")
-            return await self._reply(message,f"✅ {'Removed' if remove else 'Added'} **{role.name}** {'from' if remove else 'to'} **<@{target.id}>**.")
-        except discord.HTTPException: return await self._reply(message,"Discord denied the role change.")
+            if remove:
+                await target.remove_roles(role,reason=f"Role change by {message.author}")
+            else:
+                await target.add_roles(role,reason=f"Role change by {message.author}")
+            await self._reply(message,f"✅ {'Removed' if remove else 'Added'} **{role.name}** {'from' if remove else 'to'} **<@{target.id}>**.")
+        except discord.HTTPException:
+            await self._reply(message,"Discord denied the role change.")
 
     async def _role_admin(self,message:discord.Message,action:str,args:str):
         if not await self._has(message,"manage_roles"): return await self._reply(message,"You and I both need Manage Roles permission.")
         guild=message.guild
         if action=="createrole":
-            color_match=re.search(r"#([0-9a-fA-F]{6})",args); color=discord.Color(int(color_match.group(1),16)) if color_match else discord.Color.default()
-            hoist_match=re.search(r"\bhoist\s*[:=]?\s*(true|false)\b",args,re.I); hoist=bool(hoist_match and hoist_match.group(1).lower()=="true")
+            color_match=re.search(r"#([0-9a-fA-F]{6})",args)
+            color=discord.Color(int(color_match.group(1),16)) if color_match else discord.Color.default()
+            hoist_match=re.search(r"\bhoist\s*[:=]?\s*(true|false)\b",args,re.I)
+            hoist=bool(hoist_match and hoist_match.group(1).lower()=="true")
             name=re.sub(r"#([0-9a-fA-F]{6})|\bhoist\s*[:=]?\s*(true|false)\b","",args,flags=re.I).strip(' "')
             if not name: return await self._reply(message,"Use `createrole VIP #ff0000 hoist:true`.")
             try:
                 role=await guild.create_role(name=name[:100],colour=color,hoist=hoist,reason=f"Created by {message.author}")
-                return await self._reply(message,f"✅ Created role **<@&{role.id}>** (Color: `{color_match.group(0) if color_match else '#000000'}`).")
-            except discord.HTTPException: return await self._reply(message,"Could not create role; check Manage Roles and role hierarchy.")
+                await self._reply(message,f"✅ Created role **<@&{role.id}>** (Color: `{color_match.group(0) if color_match else '#000000'}`).")
+            except discord.HTTPException:
+                await self._reply(message,"Could not create role; check Manage Roles and role hierarchy.")
+            return
         role=next((r for r in guild.roles if f"<@&{r.id}>" in args),None)
         if not role:
             role_name=re.sub(r"#([0-9a-fA-F]{6})","",args).strip()
@@ -480,12 +585,17 @@ class ConversationalModerationCog(commands.Cog):
         if not role or role.is_default() or role.managed or not guild.me or role>=guild.me.top_role or (message.author.id!=guild.owner_id and role>=message.author.top_role): return await self._reply(message,"Role not found or above your/bot role.")
         try:
             if action=="delrole":
-                name=role.name; await role.delete(reason=f"Deleted by {message.author}"); return await self._reply(message,f"🗑️ Deleted role **{name}**.")
+                name=role.name
+                await role.delete(reason=f"Deleted by {message.author}")
+                await self._reply(message,f"🗑️ Deleted role **{name}**.")
+                return
             color_match=re.search(r"#?([0-9a-fA-F]{6})\b",args)
             if not color_match: return await self._reply(message,"Use `rolecolor @role #ff0000`.")
-            color=discord.Color(int(color_match.group(1),16)); await role.edit(colour=color,reason=f"Color changed by {message.author}")
-            return await self._reply(message,f"🎨 Updated color for **<@&{role.id}>** to `#{color_match.group(1)}`.")
-        except discord.HTTPException: return await self._reply(message,"Role update failed due to Discord permissions or API error.")
+            color=discord.Color(int(color_match.group(1),16))
+            await role.edit(colour=color,reason=f"Color changed by {message.author}")
+            await self._reply(message,f"🎨 Updated color for **<@&{role.id}>** to `#{color_match.group(1)}`.")
+        except discord.HTTPException:
+            await self._reply(message,"Role update failed due to Discord permissions or API error.")
 
     async def _case_action(self,message:discord.Message,action:str,args:str):
         guild=message.guild
@@ -493,46 +603,76 @@ class ConversationalModerationCog(commands.Cog):
             target=next(iter(self._targets(message,args)),None)
             if not target: return await self._reply(message,"Mention a member.")
             if action=="clearwarn":
-                async with aiosqlite.connect(DB_PATH) as db: cur=await db.execute("DELETE FROM mod_cases WHERE guild_id=? AND target_id=? AND action='warn'",(guild.id,target.id)); await db.commit()
-                return await self._reply(message,f"✅ Cleared all **{cur.rowcount}** warnings for **<@{target.id}>**.")
-            async with aiosqlite.connect(DB_PATH) as db: cur=await db.execute("SELECT case_id,reason,created_at,moderator_id FROM mod_cases WHERE guild_id=? AND target_id=? AND action='warn' ORDER BY case_id DESC",(guild.id,target.id)); rows=await cur.fetchall()
+                async with aiosqlite.connect(DB_PATH) as db:
+                    cur=await db.execute("DELETE FROM mod_cases WHERE guild_id=? AND target_id=? AND action='warn'",(guild.id,target.id))
+                    await db.commit()
+                await self._reply(message,f"✅ Cleared all **{cur.rowcount}** warnings for **<@{target.id}>**.")
+                return
+            async with aiosqlite.connect(DB_PATH) as db:
+                cur=await db.execute("SELECT case_id,reason,created_at,moderator_id FROM mod_cases WHERE guild_id=? AND target_id=? AND action='warn' ORDER BY case_id DESC",(guild.id,target.id))
+                rows=await cur.fetchall()
             embed=discord.Embed(title=f"Warnings for {target} ({len(rows)} total)",color=discord.Color.orange())
-            for cid,reason,created,modid in rows[:20]: embed.add_field(name=f"Case #{cid} · {created[:10]}",value=f"{reason}\nModerator: <@{modid}>",inline=False)
-            return await message.reply(embed=embed,mention_author=False,allowed_mentions=discord.AllowedMentions.none())
+            for cid,reason,created,modid in rows[:20]:
+                embed.add_field(name=f"Case #{cid} · {created[:10]}",value=f"{reason}\nModerator: <@{modid}>",inline=False)
+            await message.reply(embed=embed,mention_author=False,allowed_mentions=discord.AllowedMentions.none())
+            return
         case_match=re.search(r"\b(\d+)\b",args)
         if not case_match: return await self._reply(message,"Provide a case ID.")
         case_id=int(case_match.group(1))
         if action=="removewarn":
-            async with aiosqlite.connect(DB_PATH) as db: cur=await db.execute("DELETE FROM mod_cases WHERE guild_id=? AND case_id=? AND action='warn'",(guild.id,case_id)); await db.commit()
-            return await self._reply(message,f"✅ Removed warning **Case #{case_id}**." if cur.rowcount else "Warning case not found.")
+            async with aiosqlite.connect(DB_PATH) as db:
+                cur=await db.execute("DELETE FROM mod_cases WHERE guild_id=? AND case_id=? AND action='warn'",(guild.id,case_id))
+                await db.commit()
+            await self._reply(message,f"✅ Removed warning **Case #{case_id}**." if cur.rowcount else "Warning case not found.")
+            return
         new_reason=re.sub(r"^\s*\d+\s*","",args).strip()
         async with aiosqlite.connect(DB_PATH) as db:
-            async with db.execute("SELECT reason,log_channel_id,log_message_id FROM mod_cases WHERE guild_id=? AND case_id=?",(guild.id,case_id)) as cur: row=await cur.fetchone()
-            if not row: return await self._reply(message,"Case not found.")
-            await db.execute("UPDATE mod_cases SET reason=? WHERE guild_id=? AND case_id=?",(new_reason,guild.id,case_id)); await db.commit()
+            cur=await db.execute("SELECT reason,log_channel_id,log_message_id FROM mod_cases WHERE guild_id=? AND case_id=?",(guild.id,case_id))
+            row=await cur.fetchone()
+            if not row:
+                await self._reply(message,"Case not found.")
+                return
+            await db.execute("UPDATE mod_cases SET reason=? WHERE guild_id=? AND case_id=?",(new_reason,guild.id,case_id))
+            await db.commit()
         if row[1] and row[2]:
             ch=guild.get_channel(row[1])
             try:
-                logmsg=await ch.fetch_message(row[2]); embed=logmsg.embeds[0]; embed.set_field_at(2,name="Reason",value=new_reason[:1024],inline=False); await logmsg.edit(embed=embed)
-            except (discord.HTTPException,IndexError): pass
-        return await self._reply(message,f"📝 Updated reason for **Case #{case_id}** to: **{new_reason}**")
+                logmsg=await ch.fetch_message(row[2])
+                embed=logmsg.embeds[0]
+                embed.set_field_at(2,name="Reason",value=new_reason[:1024],inline=False)
+                await logmsg.edit(embed=embed)
+            except (discord.HTTPException,IndexError):
+                pass
+        await self._reply(message,f"📝 Updated reason for **Case #{case_id}** to: **{new_reason}**")
 
     async def _info(self,message:discord.Message,action:str,args:str):
         guild=message.guild
         if action=="serverinfo":
-            humans=sum(not m.bot for m in guild.members); bots=sum(m.bot for m in guild.members)
+            humans=sum(not m.bot for m in guild.members)
+            bots=sum(m.bot for m in guild.members)
             embed=discord.Embed(title=guild.name,color=discord.Color.blurple())
-            if guild.icon: embed.set_thumbnail(url=guild.icon.url)
-            embed.add_field(name="Owner",value=str(guild.owner or guild.owner_id)); embed.add_field(name="Members",value=f"{guild.member_count} ({humans} humans / {bots} bots)")
-            embed.add_field(name="Channels",value=str(len(guild.channels))); embed.add_field(name="Roles",value=str(len(guild.roles))); embed.add_field(name="Boost level",value=str(guild.premium_tier))
-            return await message.reply(embed=embed,mention_author=False)
+            if guild.icon:
+                embed.set_thumbnail(url=guild.icon.url)
+            embed.add_field(name="Owner",value=str(guild.owner or guild.owner_id))
+            embed.add_field(name="Members",value=f"{guild.member_count} ({humans} humans / {bots} bots)")
+            embed.add_field(name="Channels",value=str(len(guild.channels)))
+            embed.add_field(name="Roles",value=str(len(guild.roles)))
+            embed.add_field(name="Boost level",value=str(guild.premium_tier))
+            await message.reply(embed=embed,mention_author=False)
+            return
         target=next(iter(self._targets(message,args)),None)
         if not target: return await self._reply(message,"Mention a user for whois/userinfo.")
-        async with aiosqlite.connect(DB_PATH) as db: cur=await db.execute("SELECT COUNT(*) FROM mod_cases WHERE guild_id=? AND target_id=? AND action='warn'",(guild.id,target.id)); warnings=(await cur.fetchone())[0]
+        async with aiosqlite.connect(DB_PATH) as db:
+            cur=await db.execute("SELECT COUNT(*) FROM mod_cases WHERE guild_id=? AND target_id=? AND action='warn'",(guild.id,target.id))
+            warnings=(await cur.fetchone())[0]
         embed=discord.Embed(title=f"User info · {target}",color=discord.Color.blurple())
-        embed.set_thumbnail(url=target.display_avatar.url); embed.add_field(name="User ID",value=str(target.id)); embed.add_field(name="Account created",value=discord.utils.format_dt(target.created_at,"R"))
-        embed.add_field(name="Joined server",value=discord.utils.format_dt(target.joined_at,"R") if target.joined_at else "Unknown"); embed.add_field(name="Roles",value=", ".join(r.mention for r in target.roles[1:])[:1000] or "None",inline=False); embed.add_field(name="Warnings",value=str(warnings))
-        return await message.reply(embed=embed,mention_author=False,allowed_mentions=discord.AllowedMentions.none())
+        embed.set_thumbnail(url=target.display_avatar.url)
+        embed.add_field(name="User ID",value=str(target.id))
+        embed.add_field(name="Account created",value=discord.utils.format_dt(target.created_at,"R"))
+        embed.add_field(name="Joined server",value=discord.utils.format_dt(target.joined_at,"R") if target.joined_at else "Unknown")
+        embed.add_field(name="Roles",value=", ".join(r.mention for r in target.roles[1:])[:1000] or "None",inline=False)
+        embed.add_field(name="Warnings",value=str(warnings))
+        await message.reply(embed=embed,mention_author=False,allowed_mentions=discord.AllowedMentions.none())
 
 
 async def setup(bot: commands.Bot):
