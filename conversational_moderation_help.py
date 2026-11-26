@@ -1,8 +1,10 @@
 """Help embed for conversational moderation commands."""
 
 import re
+
 import discord
 from discord.ext import commands
+
 
 HELP_PATTERN = re.compile(r"^\s*(?:liebe[\s,]+)?help\s*$", re.IGNORECASE)
 
@@ -19,84 +21,98 @@ class ConversationalModerationHelp(commands.Cog):
         embed = discord.Embed(
             title="Liebe · Moderation Help",
             description=(
-                "Moderation commands work in any server text channel. "
-                "Start directly with the command or say `Liebe, <command>`. "
-                "Moderator permissions and role hierarchy are required."
+                "Moderation commands work in any server text channel. Start with the command, "
+                "or say `Liebe, <command>`. Use a member or role mention where shown. "
+                "Commands require moderator status and the matching Discord permissions; "
+                "role hierarchy is enforced."
             ),
             color=discord.Color.blurple(),
         )
-
         embed.add_field(
             name="Member punishments",
             value=(
-                "`ban @user [reason]` — permanently ban\n"
-                "`tempban @user 7d [reason]` — temporarily ban\n"
-                "`unban USER_ID [reason]` — unban by Discord ID\n"
-                "`softban @user [reason]` — ban and immediately unban\n"
-                "`massban @user @user [reason]` — ban up to 10 users\n"
-                "`kick @user [reason]` — kick\n"
-                "`mute @user 10m [reason]` — timeout\n"
-                "`unmute @user [reason]` — remove timeout"
+                "`ban @user [reason]` — permanently ban.\n"
+                "`tempban @user 7d [reason]` — temporary ban; units: `s`, `m`, `h`, `d`.\n"
+                "`unban USER_ID [reason]` — unban by ID.\n"
+                "`softban @user [reason]` — remove recent messages and kick.\n"
+                "`massban @user @user [reason]` — ban up to 10 mentioned users.\n"
+                "`kick @user [reason]` — kick. `mute @user 10m [reason]` — timeout.\n"
+                "`unmute @user [reason]` — remove timeout and configured mute role."
             ),
             inline=False,
         )
-
         embed.add_field(
-            name="Warnings",
+            name="Warnings and cases",
             value=(
-                "`warn @user [reason]` — add warning\n"
-                "`warnings @user` / `infractions @user` — list warnings\n"
-                "`removewarn CASE_ID` — remove a warning\n"
-                "`clearwarn @user` — remove all warnings\n"
-                "`reason CASE_ID new reason` — update case reason"
+                "`warn @user [reason]` — record a warning.\n"
+                "`warnings @user` / `infractions @user` — list warning cases.\n"
+                "`removewarn CASE_ID` — remove a warning.\n"
+                "`clearwarn @user` — clear warnings.\n"
+                "`reason CASE_ID new reason` — update a case reason."
             ),
             inline=False,
         )
-
         embed.add_field(
             name="Roles",
             value=(
-                "`createrole VIP #ff0000 hoist:true` — create role\n"
-                "`delrole @role` — delete role\n"
-                "`role @user @role` — toggle role\n"
-                "`addrole @user @role` — add role\n"
-                "`removerole @user @role` — remove role\n"
-                "`role all @role` / `role humans @role` / `role bots @role`\n"
-                "`rolecolor @role #ff0000` — change role color"
+                "`createrole VIP #ff0000 hoist:true` — create a colored role.\n"
+                "`delrole @role` — delete a role.\n"
+                "`role @user @role` — toggle a role.\n"
+                "`addrole @user @role` / `removerole @user @role`.\n"
+                "`role all @role` / `role humans @role` / `role bots @role` — bulk add (up to 100).\n"
+                "`rolecolor @role #ff0000` — change role color."
             ),
             inline=False,
         )
-
         embed.add_field(
-            name="Cleanup",
+            name="Message cleanup (pinned messages are kept)",
             value=(
-                "`purge 25` — bulk purge\n"
-                "`purge user @user 25`\n"
-                "`purge bot 25`\n"
-                "`purge contains \"text\" 25`\n"
-                "`purge links 25` / `purge images 25` / `purge files 25`\n"
-                "`purge embeds 25` / `purge emoji 25`\n"
-                "`purge reactions 25`\n"
-                "`cleanup 50` — remove Carl-bot and `!` command messages"
+                "`purge 25` — purge recent messages (maximum 100).\n"
+                "`purge user @user 25` / `purge bot 25`.\n"
+                '`purge contains "text" 25` — matching text.\n'
+                "`purge links 25` / `purge images 25` / `purge files 25`.\n"
+                "`purge embeds 25` / `purge emoji 25` / `purge reactions 25`.\n"
+                "`cleanup 50` — Carl-bot messages and `!` command-trigger messages."
             ),
             inline=False,
         )
-
         embed.add_field(
-            name="Channels & setup",
+            name="Channels and setup",
             value=(
-                "`lockdown [#channel] [duration]` / `unlockdown [#channel]`\n"
-                "`lockdown server [duration]` / `unlockdown server`\n"
-                "`slowmode 30s [#channel]`\n"
-                "`muterole @role` / `muterole create [name]`\n"
-                "`modlog #channel` / `modrole @role`\n"
-                "`modonly` / `unmodonly`"
+                "`lockdown [#channel] [duration]` / `unlockdown [#channel]`.\n"
+                "`lockdown server [duration]` / `unlockdown server`.\n"
+                "`slowmode 30s [#channel]` — set 0s–6h.\n"
+                "`muterole @role` / `muterole create [name]` — configure mute role.\n"
+                "`modlog #channel` — set moderation log. `modrole @role` — moderator role.\n"
+                "`modonly` / `unmodonly` — restrict or restore bot commands here."
             ),
             inline=False,
         )
-
         embed.add_field(
             name="Information",
             value=(
-                "`whois @user` / `userinfo @user` — member
-
+                "`whois @user` / `userinfo @user` — member details and warning count.\n"
+                "`serverinfo` — server details."
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Punishment actions are logged when a mod-log channel is configured.")
+
+        try:
+            await message.reply(
+                embed=embed,
+                mention_author=False,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        except discord.HTTPException:
+            try:
+                await message.channel.send(
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            except discord.HTTPException:
+                pass
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(ConversationalModerationHelp(bot))
