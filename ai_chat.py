@@ -19,6 +19,13 @@ from google.genai import types
 logger = logging.getLogger("ai_chat")
 DB_PATH = "bot_data.db"
 BOT_OWNER_ID = 1170682591414861896
+MODERATION_COMMANDS = (
+    "unlockdown", "lockdown", "muterole", "removewarn", "clearwarn", "warnings", "infractions",
+    "tempban", "softban", "massban", "unban", "unmute", "removerole", "addrole", "rolecolor",
+    "createrole", "delrole", "modrole", "modlog", "slowmode", "userinfo", "serverinfo",
+    "cleanup", "purge", "warn", "kick", "ban", "mute", "role", "help", "reason", "whois",
+    "modonly", "unmodonly",
+)
 
 
 class AIChatCog(commands.Cog):
@@ -79,6 +86,16 @@ class AIChatCog(commands.Cog):
                 for key, value in await cur.fetchall():
                     if key in self.stats:
                         self.stats[key] = value
+
+    def _is_moderation_command(self, message: discord.Message) -> bool:
+        """Keep explicit moderation commands out of AI chat, even when Liebe is mentioned."""
+        raw = message.content.strip()
+        if self.bot.user:
+            raw = re.sub(rf"^<@!?{self.bot.user.id}>\s*[,]?\s*", "", raw, flags=re.I).strip()
+        raw = re.sub(r"^Liebe\s*[,：:]\s*", "", raw, flags=re.I).strip()
+        raw = re.sub(r"^Liebe\s+", "", raw, flags=re.I).strip()
+        command_pattern = r"^(?:" + "|".join(sorted(MODERATION_COMMANDS, key=len, reverse=True)) + r")\b"
+        return bool(re.match(command_pattern, raw, re.I))
 
     async def increment_stat(self, key: str, amount: int = 1):
         self.stats[key] = self.stats.get(key, 0) + amount
@@ -250,6 +267,8 @@ class AIChatCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or not message.guild or not self.bot.user or not self.clients:
+            return
+        if self._is_moderation_command(message):
             return
         mention_pattern = rf"<@!?{self.bot.user.id}>"
         mentioned = any(user.id == self.bot.user.id for user in message.mentions) or bool(
