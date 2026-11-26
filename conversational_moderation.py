@@ -71,6 +71,11 @@ class ConversationalModerationCog(commands.Cog):
             await db.execute(
                 "CREATE TABLE IF NOT EXISTS modonly_channels (channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL)"
             )
+            await db.execute(
+                "CREATE TABLE IF NOT EXISTS mod_tempbans ("
+                "guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, expires_at TEXT NOT NULL, "
+                "PRIMARY KEY (guild_id, user_id))"
+            )
             await db.commit()
 
             async with db.execute("SELECT guild_id, mute_role_id, mod_role_id, modlog_channel_id FROM mod_config") as cur:
@@ -85,6 +90,14 @@ class ConversationalModerationCog(commands.Cog):
             async with db.execute("SELECT channel_id FROM modonly_channels") as cur:
                 for (cid,) in await cur.fetchall():
                     self.modonly_channels.add(cid)
+
+            async with db.execute("SELECT guild_id, user_id, expires_at FROM mod_tempbans") as cur:
+                pending_tempbans = await cur.fetchall()
+
+        for guild_id, user_id, expires_at in pending_tempbans:
+            task = asyncio.create_task(self._expire_ban(guild_id, user_id, expires_at))
+            self.scheduled_tasks.add(task)
+            task.add_done_callback(self.scheduled_tasks.discard)
 
     def _normalize(self, message: discord.Message) -> str:
         raw = message.content.strip()
@@ -220,9 +233,6 @@ class ConversationalModerationCog(commands.Cog):
 
         channel = message.guild.get_channel(self.modlog_channels.get(message.guild.id, 0))
         if isinstance(channel, discord.TextChannel):
-
-        channel = message.guild.get_channel(self.modlog_channels.get(message.guild.id, 0))
-        if isinstance(channel, discord.TextChannel):
             embed = discord.Embed(
                 title=f"Moderation Case #{case_id} · {action.title()}",
                 color=discord.Color.orange(),
@@ -336,17 +346,29 @@ class ConversationalModerationCog(commands.Cog):
         if not self._hierarchy_ok(message, target):
             return await self._reply(message, "I cannot act on that member because of ownership or role hierarchy.")
 
-        permission = {
-            "ban": "ban_members",
-            "tempban": "ban_members",
-            "softban": "ban_members",
-            "kick": "kick_members",
-            "mute": "moderate_members",
-            "unmute": "moderate_members",
-            "warn": "moderate_members",
-        }[canonical]
-        if not await self._has(message, permission, allow_mod_role=(canonical == "warn")):
-            return await self._reply(message, f"You and I both need {permission.replace('_', ' ').title()} permission.")
+        if canonical == "warn":
+            actor = message.author
+            actor_perms = actor.guild_permissions
+            actor_allowed = (
+                actor.id in (guild.owner_id, BOT_OWNER_ID)
+                or actor_perms.administrator
+                or actor_perms.moderate_members
+                or actor_perms.manage_messages
+                or self._has_mod_role(actor, guild)
+            )
+            if not actor_allowed:
+                return await self._reply(message, "You need Moderate Members, Manage Messages, or the configured moderator role to warn members.")
+        else:
+            permission = {
+                "ban": "ban_members",
+                "tempban": "ban_members",
+                "softban": "ban_members",
+                "kick": "kick_members",
+                "mute": "moderate_members",
+                "unmute": "moderate_members",
+            }[canonical]
+            if not await self._has(message, permission):
+                return await self._reply(message, f"You and I both need {permission.replace('_', ' ').title()} permission.")
 
         seconds = duration_seconds(args) if canonical in ("tempban", "mute") else None
         if canonical == "tempban" and (seconds is None or seconds < 60 or seconds > 365 * 86400):
@@ -363,7 +385,14 @@ class ConversationalModerationCog(commands.Cog):
                 if canonical == "softban":
                     await guild.unban(discord.Object(id=target.id), reason=f"Softban by {message.author}")
                 if canonical == "tempban":
-                    task = asyncio.create_task(self._expire_ban(guild.id, target.id, seconds))
+                    expires_at = (datetime.now(timezone.utc) + timedelta(seconds=seconds)).isoformat()
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute(
+                            "INSERT OR REPLACE INTO mod_tempbans (guild_id, user_id, expires_at) VALUES (?, ?, ?)",
+                            (guild.id, target.id, expires_at),
+                        )
+                        await db.commit()
+                    task = asyncio.create_task(self._expire_ban(guild.id, target.id, expires_at))
                     self.scheduled_tasks.add(task)
                     task.add_done_callback(self.scheduled_tasks.discard)
             elif canonical == "kick":
@@ -390,14 +419,40 @@ class ConversationalModerationCog(commands.Cog):
             logger.exception("Moderation action %s failed", action)
             await self._reply(message, f"{action.title()} failed due to a Discord API error.")
 
-    async def _expire_ban(self, guild_id: int, user_id: int, seconds: int):
-        await asyncio.sleep(seconds)
-        guild = self.bot.get_guild(guild_id)
-        if guild:
+    async def _expire_ban(self, guild_id: int, user_id: int, expires_at: str):
+        try:
+            deadline = datetime.fromisoformat(expires_at)
+            if deadline.tzinfo is None:
+                deadline = deadline.replace(tzinfo=timezone.utc)
+            await self.bot.wait_until_ready()
+            while True:
+                remaining = (deadline - datetime.now(timezone.utc)).total_seconds()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(remaining, 3600))
+
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                logger.warning("Cannot expire temporary ban: guild %s is unavailable", guild_id)
+                return
             try:
                 await guild.unban(discord.Object(id=user_id), reason="Temporary ban expired")
+            except discord.NotFound:
+                pass  # Already unbanned; clear the scheduled record below.
             except discord.HTTPException:
                 logger.exception("Temporary ban expiration failed for %s", user_id)
+                return
+
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute(
+                    "DELETE FROM mod_tempbans WHERE guild_id=? AND user_id=? AND expires_at=?",
+                    (guild_id, user_id, expires_at),
+                )
+                await db.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unexpected temporary-ban expiration error for %s", user_id)
 
     async def _case_command(self, message: discord.Message, action: str, args: str):
         if not (
@@ -411,7 +466,6 @@ class ConversationalModerationCog(commands.Cog):
             target = next(iter(self._targets(message, args)), None)
             if not target:
                 return await self._reply(message, "Mention a member.")
-            if action == "clearwarn":
             if action == "clearwarn":
                 async with aiosqlite.connect(DB_PATH) as db:
                     cur = await db.execute(

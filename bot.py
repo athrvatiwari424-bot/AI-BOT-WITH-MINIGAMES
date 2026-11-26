@@ -43,6 +43,10 @@ async def load_extensions():
             logger.info("Loaded extension: %s", extension)
         except Exception:
             logger.exception("Failed to load extension %s", extension)
+            # Conversational moderation is a core feature; don't report a healthy
+            # service while silently running without it.
+            if extension == "conversational_moderation":
+                raise
 
 
 async def handle_ping(request):

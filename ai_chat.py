@@ -21,9 +21,11 @@ DB_PATH = "bot_data.db"
 BOT_OWNER_ID = 1170682591414861896
 MODERATION_COMMANDS = (
     "unlockdown", "lockdown", "muterole", "removewarn", "clearwarn", "warnings", "infractions",
-    "tempban", "softban", "massban", "unban", "unmute", "removerole", "addrole", "rolecolor",
-    "createrole", "delrole", "modrole", "modlog", "slowmode", "userinfo", "serverinfo",
-    "cleanup", "purge", "warn", "kick", "ban", "mute", "role", "help", "reason", "whois",
+    "tempban", "softban", "massban", "unban", "unmute", "timeout", "removetimeout",
+    "removerole", "addrole", "rolecolor", "createrole", "rolecreate", "delrole", "roledelete",
+    "createchannel", "channelcreate", "delchannel", "channeldelete", "nuke", "modrole", "modlog",
+    "slowmode", "userinfo", "serverinfo", "cleanup", "purge", "warn", "kick", "ban", "mute",
+    "role", "help", "reason", "whois",
     "modonly", "unmodonly",
 )
 
@@ -141,7 +143,7 @@ class AIChatCog(commands.Cog):
     async def generate_gemini_reply(self, system_prompt: str, prompt: str) -> tuple[str | None, str | None]:
         last_error = None
         safety = [
-            types.SafetySetting(category=category, threshold=types.HarmBlockThreshold.BLOCK_NONE)
+            types.SafetySetting(category=category, threshold=types.HarmBlockThreshold.BLOCK_MEDIUM_AND_ABOVE)
             for category in (
                 types.HarmCategory.HARM_CATEGORY_HARASSMENT,
                 types.HarmCategory.HARM_CATEGORY_HATE_SPEECH,
