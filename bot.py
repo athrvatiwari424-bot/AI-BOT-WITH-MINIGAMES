@@ -36,6 +36,7 @@ async def load_extensions():
         "cricket",
         "music",
         "ai_chat",
+        "conversational_moderation",
     ]
 
     for extension in initial_extensions:
