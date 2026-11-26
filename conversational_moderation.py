@@ -220,6 +220,7 @@ class ConversationalModerationCog(commands.Cog):
 
         channel = message.guild.get_channel(self.modlog_channels.get(message.guild.id, 0))
         if isinstance(channel, discord.TextChannel):
+
         channel = message.guild.get_channel(self.modlog_channels.get(message.guild.id, 0))
         if isinstance(channel, discord.TextChannel):
             embed = discord.Embed(
