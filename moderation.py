@@ -1,4 +1,3 @@
-import random, string
 from datetime import timedelta
 import discord
 from discord import app_commands
@@ -54,38 +53,6 @@ class PurgeModal(discord.ui.Modal, title="Custom Purge"):
             await interaction.response.send_message(f"🧹 Cleared `{len(deleted)}` messages by {interaction.user.mention}.")
         except Exception as e:
             await interaction.response.send_message(f"❌ Failed to purge: {e}", ephemeral=True)
-
-
-class BlackButtonModal(discord.ui.Modal, title="NUCLEAR PROTOCOL CONFIRMATION"):
-    passcode_input = discord.ui.TextInput(label="Enter Passcode Shown in Embed", placeholder="Type exact passcode...", required=True)
-
-    def __init__(self, correct_code: str):
-        super().__init__()
-        self.correct_code = correct_code
-
-    async def on_submit(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
-            return await interaction.response.send_message("🚫 Administrators only.", ephemeral=True)
-        if self.passcode_input.value.strip() != self.correct_code:
-            return await interaction.response.send_message("❌ **Incorrect Passcode!** Aborted.", ephemeral=True)
-
-        await interaction.response.send_message("💣 **PASSCODE ACCEPTED. INITIATING SERVER ANNIHILATION...**")
-        guild = interaction.guild
-        for role in guild.roles:
-            if not role.is_default() and not role.managed and role < guild.me.top_role:
-                try:
-                    await role.delete(reason=f"Black Button by {interaction.user}")
-                except Exception:
-                    pass
-        for channel in list(guild.text_channels):
-            try:
-                new_ch = await channel.clone(reason=f"Black Button by {interaction.user}")
-                await new_ch.edit(position=channel.position)
-                await channel.delete()
-                if channel.id == interaction.channel.id:
-                    await new_ch.send(f"⚫ **THE BLACK BUTTON HAS BEEN EXECUTED** by {interaction.user.mention}.")
-            except Exception:
-                pass
 
 
 class PunishmentView(discord.ui.View):
@@ -191,19 +158,18 @@ class Moderation(commands.Cog):
     @app_commands.default_permissions(manage_channels=True)
     @app_commands.checks.has_permissions(manage_channels=True)
     async def nuke(self, interaction: discord.Interaction):
-        await interaction.response.send_message("💣 Nuking channel...", ephemeral=True)
-        ch = interaction.channel
-        new_ch = await ch.clone(reason=f"Nuked by {interaction.user}")
-        await new_ch.edit(position=ch.position)
-        await ch.delete(reason=f"Nuked by {interaction.user}")
-        await new_ch.send(f"💥 **Channel nuked!** Executed by {interaction.user.mention}.")
+        from conversational_server_actions import NukeConfirmationView
+        if not isinstance(interaction.channel, discord.TextChannel):
+            return await interaction.response.send_message("Only text channels can be reset.", ephemeral=True)
+        view = NukeConfirmationView(interaction.channel, interaction.user.id)
+        await interaction.response.send_message("⚠️ This will replace this channel and permanently remove its message history. Confirm below.", view=view, ephemeral=True)
+        view.prompt = await interaction.original_response()
 
     @app_commands.command(name="button", description="Access emergency server control buttons")
-    @app_commands.describe(choice="Choose emergency button: red, green, or black")
+    @app_commands.describe(choice="Choose emergency button: red or green")
     @app_commands.choices(choice=[
         app_commands.Choice(name="Red Button (Nightmare Mode Lockdown)", value="red"),
         app_commands.Choice(name="Green Button (Restore Normal Permissions)", value="green"),
-        app_commands.Choice(name="Black Button (Ultimate Nuclear Protocol)", value="black"),
     ])
     @app_commands.default_permissions(administrator=True)
     @app_commands.checks.has_permissions(administrator=True)
@@ -229,10 +195,6 @@ class Moderation(commands.Cog):
                 except Exception:
                     pass
             await interaction.followup.send("🟢 **Green Button pressed.** All channels restored!")
-        elif choice == "black":
-            code = "".join(random.choices(string.ascii_uppercase + string.digits, k=6))
-            embed = discord.Embed(title="🏴‍☠️ BLACK BUTTON - NUCLEAR PROTOCOL", description=f"**WARNING:** Deletes all roles and nukes all channels!\n\n🔐 **PASSCODE:** ```{code}```", color=discord.Color.dark_embed())
-            await interaction.response.send_message(embed=embed, view=BlackButtonView(code))
 
 
 async def setup(bot):

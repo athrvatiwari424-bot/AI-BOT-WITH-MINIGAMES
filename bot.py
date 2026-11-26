@@ -36,6 +36,7 @@ async def load_extensions():
         "ai_chat",
         "conversational_moderation",
         "conversational_moderation_help",
+        "community_features",
     ]
     for extension in initial_extensions:
         try:
@@ -45,7 +46,7 @@ async def load_extensions():
             logger.exception("Failed to load extension %s", extension)
             # Conversational moderation is a core feature; don't report a healthy
             # service while silently running without it.
-            if extension == "conversational_moderation":
+            if extension in ("conversational_moderation", "community_features"):
                 raise
 
 

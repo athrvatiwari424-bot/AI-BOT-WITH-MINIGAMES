@@ -596,11 +596,13 @@ class ConversationalModerationCog(commands.Cog):
             target_ch = self._find_channel(guild, args) or channel
             if not isinstance(target_ch, discord.TextChannel):
                 return await self._reply(message, "Only text channels can be nuked.")
-            pos = target_ch.position
-            cloned = await target_ch.clone(reason=f"Channel nuked by {message.author}")
-            await cloned.edit(position=pos)
-            await target_ch.delete(reason=f"Channel nuked by {message.author}")
-            return await cloned.send(f"Channel nuked by {message.author.mention}.")
+            if not isinstance(message.author, discord.Member) or not (message.author.guild_permissions.manage_channels or message.author.guild_permissions.administrator):
+                return await self._reply(message, "You need Manage Channels permission to reset a channel.")
+            from conversational_server_actions import NukeConfirmationView
+            view = NukeConfirmationView(target_ch, message.author.id)
+            prompt = await self._reply(message, f"⚠️ This will replace **#{target_ch.name}** and remove its message history. Confirm only if intended.", view=view)
+            view.prompt = prompt
+            return
     async def _role_command(self, message: discord.Message, action: str, args: str):
         guild = message.guild
         bot_member = guild.me

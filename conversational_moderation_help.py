@@ -6,7 +6,7 @@ import discord
 from discord.ext import commands
 
 
-HELP_PATTERN = re.compile(r"^\s*(?:liebe[\s,]+)?help\s*$", re.IGNORECASE)
+HELP_PATTERN = re.compile(r"^\s*(?:liebe[\s,]+)?staffhelp\s*$", re.IGNORECASE)
 
 
 class ConversationalModerationHelp(commands.Cog):
@@ -18,8 +18,16 @@ class ConversationalModerationHelp(commands.Cog):
         if message.author.bot or not message.guild or not HELP_PATTERN.fullmatch(message.content):
             return
 
+        member = message.author
+        if not isinstance(member, discord.Member):
+            return
+        perms = member.guild_permissions
+        allowed = member.id == message.guild.owner_id or any(getattr(perms, name, False) for name in ("administrator", "manage_guild", "moderate_members", "kick_members", "ban_members", "manage_messages", "manage_roles", "manage_channels"))
+        if not allowed:
+            return
+
         embed = discord.Embed(
-            title="Liebe · Moderation Help",
+            title="Liebe · Staff Help",
             description=(
                 "Moderation commands work in any server text channel. Start with the command, "
                 "or say `Liebe, <command>`. Use a member or role mention where shown. "
