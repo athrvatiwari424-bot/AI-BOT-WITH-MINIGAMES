@@ -2,6 +2,15 @@
 
 ## What's included
 
+### Expanded game library (v1.03)
+- Added `extended_games.py` and registered it as a bot extension.
+- Added `/moregames` plus a **More games** button inside `/games`.
+- Added 25 game entries across Board & Strategy, Cards & Classics, Words & Puzzles, Party & Multiplayer, and Quizzes & Challenges:
+  Chess Lite, Checkers Lite, Battleship, Ludo Sprint, Snakes & Ladders, UNO Solo, Blackjack, 2048, Minesweeper, Memory Match, Wordle, Who Am I?, Word Chain, Sentence Builder, Typing Race, Would You Rather, Reaction Speed, Number Guessing, Math Battle, Mafia/Werewolf role demo, Quiz Battle, Geography Quiz, Movie & Anime Quiz, Flag Guessing, and Riddle Battle.
+- New games record completed rounds in the existing per-server game profile and achievement system where a round has a win/loss outcome.
+- No image/GIF API usage or additional Gemini keys are introduced.
+- Honest scope notes: Chess and Checkers are lightweight practice-board versions; Ludo is a solo race variant; UNO and Battleship are solo variants; Mafia/Werewolf is currently a private role demo; Quiz Battle is currently a solo quiz round. These are not full multiplayer implementations yet. Existing Tic-Tac-Toe and Connect 4 remain the friend-challenge games.
+
 ### Minigames
 - Added `/games`, a unified public game center with a game selector.
 - Tic-Tac-Toe and Connect 4 now support both AI matches and friend challenges with accept/decline.
@@ -25,6 +34,8 @@
 
 ## Files changed
 - `minigames.py`
+- `extended_games.py`
+- `bot.py`
 - `moderation.py`
 - `community_features.py`
 - `ai_chat.py`
@@ -43,6 +54,7 @@ All other uploaded project files are included unchanged.
 The new minigame tables are created automatically in `bot_data.db`; existing database records are not intentionally cleared.
 
 ## Verification notes
+- Expanded game module and bot extension registration passed Python syntax compilation.
 - All uploaded Python files passed Python syntax compilation.
 - The new minigame SQLite schema and upsert statements passed a local SQLite test.
 - A live Discord interaction test could not be run in this environment because `discord.py` and the other runtime packages are not installed here. Test the new UI commands in a private test server before enabling them in a large server.

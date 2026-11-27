@@ -29,6 +29,7 @@ async def on_ready():
 async def load_extensions():
     initial_extensions = [
         "minigames",
+        "extended_games",
         "moderation",
         "moderation_extras",
         "cricket",

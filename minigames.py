@@ -495,6 +495,13 @@ class GamesHubView(discord.ui.View):
                  discord.SelectOption(label="Emoji Decode",value="Emoji Decode",emoji="🧩",description="Decode the emoji clue")]
         select=discord.ui.Select(placeholder="Choose a game…",options=options)
         select.callback=self.select_game; self.add_item(select)
+        more=discord.ui.Button(label="More games",style=discord.ButtonStyle.success,emoji="🎲")
+        async def open_more(interaction):
+            from extended_games import MoreGamesView
+            embed=discord.Embed(title="🎮 Liebe · More Games",description="Choose a category to explore 25 additional games.",color=discord.Color.blurple())
+            await interaction.response.send_message(embed=embed,view=MoreGamesView(self.owner),ephemeral=True)
+        more.callback=open_more
+        self.add_item(more)
     async def interaction_check(self,interaction):
         if interaction.user.id!=self.owner.id:
             await interaction.response.send_message("Open `/games` to start your own game menu.",ephemeral=True); return False
@@ -574,7 +581,7 @@ class MiniGames(commands.Cog):
     @app_commands.guild_only()
     @app_commands.command(name="games",description="Open Liebe's game center and choose a game.")
     async def games(self,interaction:discord.Interaction):
-        embed=discord.Embed(title="🎮 Liebe Game Center",description="Choose a game below. Challenge a friend or play against AI where supported.",color=discord.Color.blurple())
+        embed=discord.Embed(title="🎮 Liebe Game Center",description="Choose a game below, or use **More games** to explore the expanded library. Challenge a friend or play against AI where supported.",color=discord.Color.blurple())
         embed.add_field(name="Strategy",value="❌ Tic-Tac-Toe\n🔴 Connect 4",inline=True)
         embed.add_field(name="Quick & casual",value="✂️ Rock Paper Scissors\n🃏 High-Low\n🔤 Hangman\n🔀 Word Scramble",inline=True)
         embed.add_field(name="Brain games",value="🧠 Trivia\n🧩 Emoji Decode",inline=True)
