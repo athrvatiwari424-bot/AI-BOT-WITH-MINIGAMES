@@ -126,6 +126,7 @@ class CommunityFeatures(commands.Cog):
             except discord.HTTPException:
                 pass
 
+    @app_commands.guild_only()
     @app_commands.command(name="help", description="Show member commands and server rules")
     async def help_command(self, interaction: discord.Interaction):
         row = await self._setting(interaction.guild_id) if interaction.guild_id else None
@@ -133,12 +134,14 @@ class CommunityFeatures(commands.Cog):
         embed = discord.Embed(title="Liebe | Member Help", description="**Member commands**\n`/poll` create a poll\n`/birthday` save your birthday\n`/birthdays` view this month's birthdays\n`/invites` view your invite count\n`/leaderboard` view invite rankings\n\n**Server rules**\n" + rules[:3000], color=discord.Color.blurple())
         await interaction.response.send_message(embed=embed)
 
+    @app_commands.guild_only()
     @app_commands.command(name="staffhelp", description="Show staff-only commands")
     @staff_only()
     async def staffhelp(self, interaction: discord.Interaction):
         embed = discord.Embed(title="Liebe | Staff Help", description="**Moderation**\n`/punishment`, `/ban`, `/kick`, `/timeout`, `/purge`, `/bans`\n\n**Server setup**\n`/echo`, `/reactionrole`, `/welcomesetup`, `/invitesetup`, `/setrules`, `/rolecolor`\n\nUse conversational commands such as `warn @member reason` where enabled. Every action still checks Discord permissions and hierarchy.", color=discord.Color.dark_teal())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
+    @app_commands.guild_only()
     @app_commands.command(name="setrules", description="Set the rules shown in member help")
     @app_commands.describe(text="Server rules text")
     @staff_only()
@@ -146,6 +149,7 @@ class CommunityFeatures(commands.Cog):
         await self._save_setting(interaction.guild_id, "rules", text)
         await interaction.response.send_message("✅ Member rules updated.", ephemeral=True)
 
+    @app_commands.guild_only()
     @app_commands.command(name="echo", description="Send a formatted announcement as Liebe")
     @staff_only()
     async def echo(self, interaction: discord.Interaction, message: app_commands.Range[str, 1, 1800], channel: discord.TextChannel | None = None):
@@ -157,6 +161,7 @@ class CommunityFeatures(commands.Cog):
         await target.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
         await interaction.response.send_message(f"Announcement posted in {target.mention}.", ephemeral=True)
 
+    @app_commands.guild_only()
     @app_commands.command(name="poll", description="Create a yes/no poll")
     async def poll(self, interaction: discord.Interaction, question: app_commands.Range[str, 1, 240]):
         embed = discord.Embed(title="📊 Community Poll", description=question, color=discord.Color.blurple())
@@ -167,11 +172,19 @@ class CommunityFeatures(commands.Cog):
             try: await msg.add_reaction(emoji)
             except discord.HTTPException: pass
 
+    @app_commands.guild_only()
     @app_commands.command(name="reactionrole", description="Create a reaction-role panel")
     @staff_only()
     async def reactionrole(self, interaction: discord.Interaction, channel: discord.TextChannel, role: discord.Role, emoji: str, label: app_commands.Range[str, 1, 80] = "Get this role"):
-        if role.is_default() or role.managed or role >= interaction.guild.me.top_role or (interaction.user.id != interaction.guild.owner_id and role >= interaction.user.top_role):
-            return await interaction.response.send_message("That role is above your or the bot's role, managed, or @everyone.", ephemeral=True)
+        dangerous = role.permissions.administrator or any((
+            role.permissions.manage_guild, role.permissions.manage_roles,
+            role.permissions.manage_channels, role.permissions.manage_webhooks,
+            role.permissions.ban_members, role.permissions.kick_members,
+            role.permissions.moderate_members, role.permissions.manage_messages,
+            role.permissions.mention_everyone,
+        ))
+        if role.is_default() or role.managed or dangerous or role >= interaction.guild.me.top_role or (interaction.user.id != interaction.guild.owner_id and role >= interaction.user.top_role):
+            return await interaction.response.send_message("That role is privileged, managed, above your or the bot's role, or @everyone. Only safe self-assignable roles are allowed.", ephemeral=True)
         embed = discord.Embed(title="Self-assignable role", description=f"React with {emoji} to {label}: {role.mention}", color=discord.Color.blurple())
         msg = await channel.send(embed=embed)
         try: await msg.add_reaction(emoji)
@@ -183,6 +196,7 @@ class CommunityFeatures(commands.Cog):
             await db.commit()
         await interaction.response.send_message(f"Reaction role panel created in {channel.mention}.", ephemeral=True)
 
+    @app_commands.guild_only()
     @app_commands.command(name="welcomesetup", description="Configure the welcome channel and message")
     @staff_only()
     async def welcomesetup(self, interaction: discord.Interaction, channel: discord.TextChannel, message: app_commands.Range[str, 1, 800] = "Welcome {member} to **{server}**! You are member #{count}."):
@@ -190,6 +204,7 @@ class CommunityFeatures(commands.Cog):
         await self._save_setting(interaction.guild_id, "welcome_message", message)
         await interaction.response.send_message(f"Welcome messages will be sent in {channel.mention}. Placeholders: `{{member}}`, `{{server}}`, `{{count}}`.", ephemeral=True)
 
+    @app_commands.guild_only()
     @app_commands.command(name="invitesetup", description="Check invite tracking permissions and enable tracking")
     @staff_only()
     async def invitesetup(self, interaction: discord.Interaction):
@@ -198,6 +213,7 @@ class CommunityFeatures(commands.Cog):
         await self._cache_invites(interaction.guild)
         await interaction.response.send_message("Invite tracking initialized. Discord may not reveal vanity or some unknown invite sources.", ephemeral=True)
 
+    @app_commands.guild_only()
     @app_commands.command(name="invites", description="Show your tracked invite count")
     async def invites(self, interaction: discord.Interaction, member: discord.Member | None = None):
         target = member or interaction.user
@@ -206,6 +222,7 @@ class CommunityFeatures(commands.Cog):
             row = await cur.fetchone()
         await interaction.response.send_message(embed=discord.Embed(title="Invite count", description=f"{target.mention} has **{row[0] if row else 0}** tracked invites.", color=discord.Color.blurple()))
 
+    @app_commands.guild_only()
     @app_commands.command(name="leaderboard", description="Show the top inviters")
     async def leaderboard(self, interaction: discord.Interaction):
         async with aiosqlite.connect(DB) as db:
@@ -214,6 +231,7 @@ class CommunityFeatures(commands.Cog):
         desc = "\n".join(f"**{i}.** <@{uid}> · **{uses}** invites" for i,(uid,uses) in enumerate(rows,1)) or "No tracked invites yet."
         await interaction.response.send_message(embed=discord.Embed(title="🏆 Invite Leaderboard", description=desc, color=discord.Color.gold()))
 
+    @app_commands.guild_only()
     @app_commands.command(name="birthday", description="Register or update your birthday (month and day only)")
     async def birthday(self, interaction: discord.Interaction, month: app_commands.Range[int, 1, 12], day: app_commands.Range[int, 1, 31]):
         import datetime
@@ -224,6 +242,7 @@ class CommunityFeatures(commands.Cog):
             await db.commit()
         await interaction.response.send_message("🎂 Your birthday has been saved (year not stored).", ephemeral=True)
 
+    @app_commands.guild_only()
     @app_commands.command(name="birthdays", description="Show birthdays this month")
     async def birthdays(self, interaction: discord.Interaction):
         from datetime import datetime
@@ -233,6 +252,7 @@ class CommunityFeatures(commands.Cog):
         desc = "\n".join(f"**{day:02d}** · <@{uid}>" for uid,day in rows) or "No birthdays registered this month."
         await interaction.response.send_message(embed=discord.Embed(title="🎂 Birthday Chart", description=desc, color=discord.Color.magenta()))
 
+    @app_commands.guild_only()
     @app_commands.command(name="rolecolor", description="Change a role colour")
     @staff_only()
     async def rolecolor(self, interaction: discord.Interaction, role: discord.Role, hex_color: str):
@@ -243,6 +263,7 @@ class CommunityFeatures(commands.Cog):
         await role.edit(colour=discord.Color(int(hex_color.lstrip('#'),16)), reason=f"Role colour changed by {interaction.user.id}")
         await interaction.response.send_message(f"Updated {role.mention} colour to `#{hex_color.lstrip('#').upper()}`.")
 
+    @app_commands.guild_only()
     @app_commands.command(name="bans", description="List recent server bans")
     @staff_only()
     async def bans(self, interaction: discord.Interaction):

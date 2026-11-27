@@ -222,6 +222,7 @@ class AIChatCog(commands.Cog):
     @app_commands.command(name="setaichat", description="Set a channel for AI chat and memory.")
     @app_commands.describe(channel="The text channel for AI chat")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
     async def set_ai_chat(self, interaction: discord.Interaction, channel: discord.TextChannel):
         if not interaction.guild or not self.clients:
             return await interaction.response.send_message(
@@ -240,6 +241,7 @@ class AIChatCog(commands.Cog):
 
     @app_commands.command(name="clearaichat", description="Disable the configured AI chat channel.")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
     async def clear_ai_chat(self, interaction: discord.Interaction):
         if not interaction.guild:
             return await interaction.response.send_message("Server only.", ephemeral=True)
@@ -253,6 +255,7 @@ class AIChatCog(commands.Cog):
 
     @app_commands.command(name="aistatus", description="View AI status and usage statistics.")
     @app_commands.default_permissions(administrator=True)
+    @app_commands.checks.has_permissions(administrator=True)
     async def ai_status(self, interaction: discord.Interaction):
         if not interaction.guild:
             return await interaction.response.send_message("Server only.", ephemeral=True)
