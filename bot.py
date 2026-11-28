@@ -22,6 +22,7 @@ async def on_ready():
     try:
         synced = await bot.tree.sync()
         logger.info("Synced %s slash command(s).", len(synced))
+        logger.info("Registered slash commands: %s", ", ".join(sorted(command.name for command in bot.tree.get_commands())))
     except Exception:
         logger.exception("Failed to sync slash commands")
 
@@ -50,7 +51,7 @@ async def load_extensions():
             logger.exception("Failed to load extension %s", extension)
             # Conversational moderation is a core feature; don't report a healthy
             # service while silently running without it.
-            if extension in ("conversational_moderation", "community_features"):
+            if extension in ("conversational_moderation", "community_features", "logging_system"):
                 raise
 
 
