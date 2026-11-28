@@ -1,60 +1,53 @@
-# Liebe Bot update notes
+# Liebe Bot - Beta v1.031
 
-## What's included
+This update is based on the latest expanded-games v1.03 project.
 
-### Expanded game library (v1.03)
-- Added `extended_games.py` and registered it as a bot extension.
-- Added `/moregames` plus a **More games** button inside `/games`.
-- Added 25 game entries across Board & Strategy, Cards & Classics, Words & Puzzles, Party & Multiplayer, and Quizzes & Challenges:
-  Chess Lite, Checkers Lite, Battleship, Ludo Sprint, Snakes & Ladders, UNO Solo, Blackjack, 2048, Minesweeper, Memory Match, Wordle, Who Am I?, Word Chain, Sentence Builder, Typing Race, Would You Rather, Reaction Speed, Number Guessing, Math Battle, Mafia/Werewolf role demo, Quiz Battle, Geography Quiz, Movie & Anime Quiz, Flag Guessing, and Riddle Battle.
-- New games record completed rounds in the existing per-server game profile and achievement system where a round has a win/loss outcome.
-- No image/GIF API usage or additional Gemini keys are introduced.
-- Honest scope notes: Chess and Checkers are lightweight practice-board versions; Ludo is a solo race variant; UNO and Battleship are solo variants; Mafia/Werewolf is currently a private role demo; Quiz Battle is currently a solo quiz round. These are not full multiplayer implementations yet. Existing Tic-Tac-Toe and Connect 4 remain the friend-challenge games.
+## Echo
+- `/echo` now offers two output formats: normal bot-authored message or embed.
+- The embed no longer says who invoked the command.
+- Natural text `echo <message>` sends a normal message.
+- Echo command usage is recorded in the mod log and, when configured, the separate bot log.
 
-### Minigames
-- Added `/games`, a unified public game center with a game selector.
-- Tic-Tac-Toe and Connect 4 now support both AI matches and friend challenges with accept/decline.
-- Added Rock Paper Scissors, High-Low (no currency or bets), Hangman, Word Scramble, Trivia, and Emoji Decode.
-- Added `/profile`, `/achievements`, and `/serverstats`.
-- Added persistent per-server player stats and achievements in `bot_data.db`.
-- No XP, levels, or economy system was added.
-- Kept `/tictactoe`, `/connect4`, and `/highlow` available.
+## AI chat
+- Mentioning Liebe triggers AI chat in any guild text channel; `/setaichat` is no longer required for mention-triggered replies.
+- A bare mention now receives a short prompt asking what the member needs.
+- The configured AI channel still works as before.
+- Existing three Gemini environment keys and model configuration are unchanged.
 
-### Security and server controls
-- Revalidated target hierarchy and permissions when punishment modals are submitted.
-- Limited purge modal input to 1–100 messages and rechecked permissions at submission.
-- Restricted reaction-role setup from assigning privileged roles to members.
-- Added runtime Administrator checks to AI-chat configuration commands.
-- Emergency `/button red` now saves each channel's original @everyone permission values; `/button green` restores those saved values instead of blindly clearing existing overwrites.
-- Kept `/nuke` confirmation restricted to the person who initiated it and rechecks permissions at confirmation.
+## Logging
+- `/message-log <channel>` configures deleted and edited message logs.
+- `/mod-log <channel>` configures command usage and command error logs.
+- `/bot-log <channel>` configures bot-specific logs, including echo usage.
+- `/bot-update-log [enabled]` must be run inside the configured mod-log channel. It enables/disables automatic version announcements there.
+- Game commands are excluded from mod-log command activity.
+- Logs use embeds with Discord timestamps and date/time footers.
+- Cached message text, attachments, photo/file URLs, embed links and available forwarded-message snapshots are included.
 
-### Privacy and legal text
-- Updated the privacy policy to disclose game records, achievements, and AI memory summaries.
-- Updated the Terms of Service date/version.
+## Tickets
+- New `tickets.py` extension.
+- `/ticket-setup <channel>` creates a panel and default Support, Sponsorship, General Help and Other categories.
+- Buttons create private ticket channels under the matching category.
+- `/ticket-edit <title> <description>` edits the panel embed.
+- `/ticket-category <type> <category>` maps a ticket type to an existing category.
+- Ticket owners and staff with Manage Channels/Administrator access can close tickets. Closing restricts the owner from sending and renames the channel; it does not delete it.
+- Ticket panels and open tickets are persistent across restarts.
 
-## Files changed
-- `minigames.py`
-- `extended_games.py`
-- `bot.py`
-- `moderation.py`
-- `community_features.py`
-- `ai_chat.py`
-- `privacy.md`
-- `liebe-bot-legal`
+## Server templates
+- New `server_templates.py` extension.
+- `/template-copy <source>` accepts a source server ID (Liebe must be in that server) or an official Discord template URL. `discordtemplates.me` pages are supported when they expose an official Discord template link.
+- Import requires administrator permission and confirmation.
+- The importer is create-only: it does not delete or overwrite existing target roles/channels.
+- It imports role names/colors/selected permissions and category/text/announcement/voice channel structure with role-based channel overwrites where available.
+- Administrator permission is stripped from imported roles.
+- Arbitrary website formats, message history, integrations, webhooks, emoji, member assignments, forum/stage channels and all other server data are not universally importable.
 
-All other uploaded project files are included unchanged.
+## Important logging limitations
+- Discord does not provide the contents of a deleted message after the fact. Liebe caches messages while online; deleted messages sent before startup or not cached can only be logged as deletion events without their content.
+- Attachment URLs and forwarded snapshots are logged only when Discord includes them in cached/raw message data. Some forwarded-message details are not exposed by Discord.
+- Update announcements are opt-in per server and are posted once when `BOT_VERSION` changes in `logging_system.py`.
+- There is no separate global "community enabled" switch in this project; configuring the log commands is the opt-in.
 
 ## Deployment
-1. Download and extract the ZIP.
-2. Replace the matching files in your GitHub repository with the extracted files.
-3. Commit and push the changes.
-4. Let your host redeploy. No new Python package is required.
-5. After the bot starts, Discord may take a little time to refresh globally synced slash commands.
-
-The new minigame tables are created automatically in `bot_data.db`; existing database records are not intentionally cleared.
-
-## Verification notes
-- Expanded game module and bot extension registration passed Python syntax compilation.
-- All uploaded Python files passed Python syntax compilation.
-- The new minigame SQLite schema and upsert statements passed a local SQLite test.
-- A live Discord interaction test could not be run in this environment because `discord.py` and the other runtime packages are not installed here. Test the new UI commands in a private test server before enabling them in a large server.
+- No new third-party dependencies were added.
+- `bot.py` now loads `logging_system`, `tickets`, and `server_templates`.
+- Keep the existing `DISCORD_TOKEN` and Gemini API environment variables private; no key changes are required.

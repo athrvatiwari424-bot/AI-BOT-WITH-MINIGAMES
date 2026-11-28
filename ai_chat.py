@@ -285,7 +285,10 @@ class AIChatCog(commands.Cog):
             return
         content = re.sub(mention_pattern, "", message.content).strip()
         if not content:
-            return
+            if mentioned:
+                content = "The member mentioned Liebe without adding a question. Greet them briefly and ask how you can help."
+            else:
+                return
         member = message.author if isinstance(message.author, discord.Member) else message.guild.get_member(message.author.id)
         if member is None:
             return

@@ -38,6 +38,9 @@ async def load_extensions():
         "conversational_moderation",
         "conversational_moderation_help",
         "community_features",
+        "logging_system",
+        "tickets",
+        "server_templates",
     ]
     for extension in initial_extensions:
         try:

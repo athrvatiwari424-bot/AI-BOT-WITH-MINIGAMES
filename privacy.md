@@ -23,3 +23,7 @@ Collected data is used strictly to:
 
 ## 4. Data Deletion
 You may request deletion of stored game stats, achievements, AI memory summaries, or server data by contacting **Not Gamer** (`notgamer__69`) on Discord.
+
+
+## Server logging and tickets
+When administrators enable Liebe logging, the bot may record deleted and edited guild messages, including available text, attachment links, embed links, and forwarded-message snapshots, in the configured message-log channel. Command and moderation usage/error metadata may be recorded in the configured mod-log channel. Ticket data such as ticket owner, category, channel ID, and open/closed status is stored to operate the ticket system. Server administrators control these features and should configure access to log channels carefully. Discord may not provide content for messages deleted before Liebe cached them.

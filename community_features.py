@@ -138,7 +138,7 @@ class CommunityFeatures(commands.Cog):
     @app_commands.command(name="staffhelp", description="Show staff-only commands")
     @staff_only()
     async def staffhelp(self, interaction: discord.Interaction):
-        embed = discord.Embed(title="Liebe | Staff Help", description="**Moderation**\n`/punishment`, `/ban`, `/kick`, `/timeout`, `/purge`, `/bans`\n\n**Server setup**\n`/echo`, `/reactionrole`, `/welcomesetup`, `/invitesetup`, `/setrules`, `/rolecolor`\n\nUse conversational commands such as `warn @member reason` where enabled. Every action still checks Discord permissions and hierarchy.", color=discord.Color.dark_teal())
+        embed = discord.Embed(title="Liebe | Staff Help", description="**Moderation**\n`/punishment`, `/ban`, `/kick`, `/timeout`, `/purge`, `/bans`\n\n**Server setup**\n`/echo`, `/message-log`, `/mod-log`, `/bot-log`, `/bot-update-log`, `/ticket-setup`, `/ticket-edit`, `/template-copy`, `/reactionrole`, `/welcomesetup`, `/invitesetup`, `/setrules`, `/rolecolor`\n\nUse conversational commands such as `warn @member reason` where enabled. Every action still checks Discord permissions and hierarchy.", color=discord.Color.dark_teal())
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.guild_only()
@@ -150,15 +150,17 @@ class CommunityFeatures(commands.Cog):
         await interaction.response.send_message("✅ Member rules updated.", ephemeral=True)
 
     @app_commands.guild_only()
-    @app_commands.command(name="echo", description="Send a formatted announcement as Liebe")
+    @app_commands.command(name="echo", description="Send a normal message or embed as Liebe")
+    @app_commands.choices(format=[app_commands.Choice(name="Normal message", value="message"), app_commands.Choice(name="Embed", value="embed")])
     @staff_only()
-    async def echo(self, interaction: discord.Interaction, message: app_commands.Range[str, 1, 1800], channel: discord.TextChannel | None = None):
+    async def echo(self, interaction: discord.Interaction, message: app_commands.Range[str, 1, 1800], format: str, channel: discord.TextChannel | None = None):
         target = channel or interaction.channel
         if not isinstance(target, discord.TextChannel) or not target.permissions_for(interaction.guild.me).send_messages:
             return await interaction.response.send_message("I cannot send messages in that channel.", ephemeral=True)
-        embed = discord.Embed(description=message, color=discord.Color.blurple())
-        embed.set_footer(text=f"Posted by {interaction.user.display_name}")
-        await target.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        if format == "embed":
+            await target.send(embed=discord.Embed(description=message, color=discord.Color.blurple()), allowed_mentions=discord.AllowedMentions.none())
+        else:
+            await target.send(message, allowed_mentions=discord.AllowedMentions.none())
         await interaction.response.send_message(f"Announcement posted in {target.mention}.", ephemeral=True)
 
     @app_commands.guild_only()
@@ -364,7 +366,7 @@ class CommunityFeatures(commands.Cog):
         if raw.lower().startswith("echo "):
             if not is_staff(message.author): return await message.reply("Staff only.", mention_author=False)
             text = raw[5:].strip()
-            if text: await message.channel.send(embed=discord.Embed(description=text[:1800], color=discord.Color.blurple()), allowed_mentions=discord.AllowedMentions.none())
+            if text: await message.channel.send(text[:1800], allowed_mentions=discord.AllowedMentions.none())
             return
         if raw.lower().startswith("birthday "):
             m = re.fullmatch(r"birthday\s+(\d{1,2})\s+(\d{1,2})", raw, re.I)
