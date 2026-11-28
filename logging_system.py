@@ -124,7 +124,7 @@ class LoggingSystem(commands.Cog):
         for field, title in (("attachments", "Attachments / photos / files"), ("embeds", "Links / embeds"), ("forwarded", "Forwarded content")):
             values = snap.get(field) or []
             if values:
-                embed.add_field(name=title, value="\n".join(values)[:1000], inline=False)
+                embed.add_field(name=title, value="\\n".join(values)[:1000], inline=False)
         if snap.get("jump_url"):
             embed.add_field(name="Original message", value=snap["jump_url"], inline=False)
         await self._send_log(guild, settings[0], embed)
@@ -150,7 +150,7 @@ class LoggingSystem(commands.Cog):
         embed.add_field(name="Used by", value=f"{user} (`{user.id}`)", inline=True)
         embed.add_field(name="Channel", value=getattr(channel, "mention", "Unknown"), inline=True)
         if error:
-            safe_error = re.sub(r"(?i)(token|api[_ -]?key|authorization)\s*[:=]\s*\S+", r"\1=[redacted]", str(error))
+            safe_error = re.sub(r"(?i)(token|api[_ -]?key|authorization)\\s*[:=]\\s*\\S+", r"\\1=[redacted]", str(error))
             embed.add_field(name="Error", value=safe_error[:900], inline=False)
         await self._send_log(guild, settings[1], embed)
         if command.split()[0].lower() == "echo" and settings[2]:
@@ -180,7 +180,7 @@ class LoggingSystem(commands.Cog):
     @app_commands.guild_only()
     @app_commands.command(name="bot-log", description="Set the channel for bot-specific activity such as echo usage")
     @admin_only()
-    async def bot_log(self, interaction: discord.Interaction, channel: discord.TextChannel):
+    async def configure_bot_log(self, interaction: discord.Interaction, channel: discord.TextChannel):
         if not channel.permissions_for(interaction.guild.me).send_messages or not channel.permissions_for(interaction.guild.me).embed_links:
             return await interaction.response.send_message("I need Send Messages and Embed Links in that channel.", ephemeral=True)
         await self._save(interaction.guild_id, "bot_log", channel.id)
@@ -190,7 +190,7 @@ class LoggingSystem(commands.Cog):
     @app_commands.command(name="bot-update-log", description="Enable or disable automatic Liebe update posts in this mod-log channel")
     @app_commands.describe(enabled="Whether automatic bot update announcements should be enabled")
     @admin_only()
-    async def bot_update_log(self, interaction: discord.Interaction, enabled: bool = True):
+    async def configure_bot_update_log(self, interaction: discord.Interaction, enabled: bool = True):
         settings = await self._settings(interaction.guild_id)
         if not settings or not settings[1] or settings[1] != interaction.channel_id:
             return await interaction.response.send_message("Run `/bot-update-log` inside the channel configured with `/mod-log`.", ephemeral=True)
@@ -205,7 +205,7 @@ class LoggingSystem(commands.Cog):
             if not settings or not settings[3] or not settings[1] or settings[4] == BOT_VERSION:
                 continue
             embed = self._base_embed("🚀 Liebe Bot Updated", discord.Color.green())
-            embed.description = f"Liebe is now running **{BOT_VERSION}**.\n\n**What changed:** {BOT_UPDATE_SUMMARY}"
+            embed.description = f"Liebe is now running **{BOT_VERSION}**.\\n\\n**What changed:** {BOT_UPDATE_SUMMARY}"
             sent = await self._send_log(guild, settings[1], embed)
             if not sent:
                 continue
@@ -231,7 +231,7 @@ class LoggingSystem(commands.Cog):
         else:
             snap = {"guild_id": payload.guild_id, "channel_id": payload.channel_id, "author_id": "unknown", "author": "Unknown (message was not cached)", "content": "[Previous content unavailable]", "attachments": [], "embeds": [], "forwarded": [], "created_at": None, "jump_url": ""}
         if "content" in data:
-            snap["content"] = f"**Before:**\n{snap.get('content', '[Previous content unavailable]')}\n\n**After:**\n{data.get('content') or '[No text content]'}"
+            snap["content"] = f"**Before:**\\n{snap.get('content', '[Previous content unavailable]')}\\n\\n**After:**\\n{data.get('content') or '[No text content]'}"
         raw_attachments = data.get("attachments") or []
         if raw_attachments:
             snap["attachments"] = [f"{item.get('filename', 'file')} ({item.get('url', '')})" for item in raw_attachments]
